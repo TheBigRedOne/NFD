@@ -225,6 +225,9 @@ private:
   processConfig(const ConfigSection& configSection, bool isDryRun,
                 const std::string& filename);
 
+  // 新增泛洪方法，用于向所有相邻节点发送数据包
+  void floodToAllNeighbors(const Data& data, const FaceEndpoint& ingress);
+
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
    * \brief Configuration options from the `forwarder` section.
