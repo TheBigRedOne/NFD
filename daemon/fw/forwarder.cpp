@@ -301,6 +301,13 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
   ++m_counters.nInData;
   NFD_LOG_DEBUG("onIncomingData in=" << ingress << " data=" << data.getName());
 
+    // 检查 MetaInfo 中的 MobilityFlag
+  if (data.getMetaInfo().getMobilityFlag()) {
+    NFD_LOG_DEBUG("MobilityFlag is set, initiating flooding to all neighbors.");
+    this->floodToAllNeighbors(data, ingress);  // 泛洪逻辑
+    return;  // Flooding completed, no further action required
+  }
+
   // /localhost scope control
   bool isViolatingLocalhost = ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL &&
                               scope_prefix::LOCALHOST.isPrefixOf(data.getName());
@@ -385,6 +392,24 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       // go to outgoing Data pipeline
       this->onOutgoingData(data, *pendingDownstream);
     }
+  }
+}
+
+void
+Forwarder::floodToAllNeighbors(const Data& data, const FaceEndpoint& ingress)
+{
+  NFD_LOG_DEBUG("Flooding Data to all neighbors: " << data.getName());
+
+  // 遍历所有相邻节点，将数据包发送给每一个邻居
+  for (const auto& face : m_faceTable) {
+    if (&face == &ingress.face) {
+      // 不要回发给接收数据包的接口
+      continue;
+    }
+
+    // 发送数据包
+    NFD_LOG_DEBUG("Sending Data to face: " << face.getId());
+    face.sendData(data);
   }
 }
 
