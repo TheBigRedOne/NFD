@@ -301,9 +301,23 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
   ++m_counters.nInData;
   NFD_LOG_DEBUG("onIncomingData in=" << ingress << " data=" << data.getName());
 
-    // 检查 MetaInfo 中的 MobilityFlag
+  // 检查 MetaInfo 中的 MobilityFlag
   if (data.getMetaInfo().getMobilityFlag()) {
-    NFD_LOG_DEBUG("MobilityFlag is set, initiating flooding to all neighbors.");
+    NFD_LOG_DEBUG("MobilityFlag is set, checking HopLimit.");
+
+    // 检查 HopLimit
+    uint8_t hopLimit = data.getMetaInfo().getHopLimit();
+    
+    if (hopLimit == 0) {
+      NFD_LOG_DEBUG("HopLimit is 0, discarding Data: " << data.getName());
+      return;  // 丢弃数据包，停止处理
+    }
+
+    // 将 HopLimit 减 1
+    data.getMetaInfo().setHopLimit(hopLimit - 1);
+
+    // 继续泛洪到所有邻居
+    NFD_LOG_DEBUG("HopLimit is greater than 0, initiating flooding to all neighbors.");
     this->floodToAllNeighbors(data, ingress);  // 泛洪逻辑
     return;  // Flooding completed, no further action required
   }
