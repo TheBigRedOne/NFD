@@ -301,6 +301,16 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
   ++m_counters.nInData;
   NFD_LOG_DEBUG("onIncomingData in=" << ingress << " data=" << data.getName());
 
+  // 检查数据包的时间戳是否已经超时
+  time::milliseconds now = time::steady_clock::now();
+  time::milliseconds timeStamp = data.getMetaInfo().getTimeStamp();
+  time::milliseconds maxTtl = 5000_ms;  // 假设最大 TTL 为 5 秒
+
+  if ((now - timeStamp) > maxTtl) {
+    NFD_LOG_DEBUG("Data expired due to TTL, discarding: " << data.getName());
+    return;  // 丢弃数据包，停止处理
+  }
+
   // 检查 MetaInfo 中的 MobilityFlag
   if (data.getMetaInfo().getMobilityFlag()) {
     NFD_LOG_DEBUG("MobilityFlag is set, checking HopLimit.");
