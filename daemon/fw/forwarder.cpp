@@ -461,6 +461,26 @@ Forwarder::onFibUpdate()
 }
 
 void
+Forwarder::sendGlobalRoutingUpdateNotification()
+{
+  NFD_LOG_DEBUG("Sending global routing update notification to producer.");
+
+  // 遍历所有 Face，找到连接的生产者
+  for (const auto& face : m_faceTable) {
+    if (face.isProducerConnected()) {  // 判断是否是与生产者连接的 face
+      // 创建一条特殊的 Data 包，通知生产者全局路由更新
+      auto data = std::make_shared<Data>("/local/ndn/forwarder/globalRoutingUpdate");
+      const std::string content = "updated";  // 消息内容为 "updated"
+      data->setContent(makeStringBlock(tlv::Content, content));
+
+      // 发送数据包到生产者
+      NFD_LOG_DEBUG("Notifying producer connected to face: " << face.getId());
+      face.sendData(*data);
+    }
+  }
+}
+
+void
 Forwarder::clearFloodPackets()
 {
   NFD_LOG_DEBUG("Clearing all flood packets due to global routing update.");
