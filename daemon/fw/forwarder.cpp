@@ -84,6 +84,9 @@ Forwarder::Forwarder(FaceTable& faceTable)
   });
 
   m_strategyChoice.setDefaultStrategy(getDefaultStrategyName());
+
+  // 注册监听 Fib 表的更新事件
+  m_fib.afterUpdate.connect([this] { this->onFibUpdate(); });
 }
 
 void
@@ -434,6 +437,51 @@ Forwarder::floodToAllNeighbors(const Data& data, const FaceEndpoint& ingress)
     // 发送数据包
     NFD_LOG_DEBUG("Sending Data to face: " << face.getId());
     face.sendData(data);
+  }
+}
+
+void
+Forwarder::onFibUpdate()
+{
+  NFD_LOG_DEBUG("Fib updated, checking for global routing changes.");
+
+  // 遍历 Fib 表，查看是否有生产者相关的前缀从不可达变为可达
+  for (const auto& entry : m_fib) {
+    if (entry.isReachable()) {  // 判断 Fib 条目是否可达
+      NFD_LOG_DEBUG("Detected reachable prefix, stopping flood packets.");
+
+      // 标记全局路由已经更新
+      m_isGlobalRoutingUpdated = true;
+
+      // 清除所有带有 MobilityFlag 的泛洪数据包
+      this->clearFloodPackets();
+      break;  // 一旦检测到更新完成，退出遍历
+    }
+  }
+}
+
+void
+Forwarder::clearFloodPackets()
+{
+  NFD_LOG_DEBUG("Clearing all flood packets due to global routing update.");
+
+  // 遍历所有相邻节点，清除带有 MobilityFlag 的数据包
+  for (const auto& face : m_faceTable) {
+    face.clearFloodingPackets();  // 清除所有带有 MobilityFlag 的数据包
+  }
+}
+
+void
+Face::clearFloodingPackets()
+{
+  // 遍历待处理队列，找到所有带有 MobilityFlag 的数据包并丢弃
+  for (auto it = m_pendingPackets.begin(); it != m_pendingPackets.end(); ) {
+    if (it->getMetaInfo().getMobilityFlag()) {
+      NFD_LOG_DEBUG("Dropping flooding packet: " << it->getName());
+      it = m_pendingPackets.erase(it);  // 丢弃数据包
+    } else {
+      ++it;
+    }
   }
 }
 
