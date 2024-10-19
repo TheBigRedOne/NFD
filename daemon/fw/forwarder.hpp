@@ -133,6 +133,9 @@ public:
   void
   setConfigFile(ConfigFile& configFile);
 
+  // 新增 onFibUpdate 方法，用于处理 Fib 表更新事件
+  void onFibUpdate();
+
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE: // pipelines
   /** \brief Incoming Interest pipeline.
    *  \param interest the incoming Interest, must be well-formed and created with make_shared
@@ -227,6 +230,8 @@ private:
 
   // 新增泛洪方法，用于向所有相邻节点发送数据包
   void floodToAllNeighbors(const Data& data, const FaceEndpoint& ingress);
+
+  bool m_isGlobalRoutingUpdated = false;  // 标记全局路由是否已更新
 
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
