@@ -24,6 +24,9 @@
  */
 
 #include "forwarder.hpp"
+#include "daemon/mgmt/controller.hpp"
+#include "daemon/mgmt/ndn-ctrl-command.hpp"
+#include <ndn-cxx/optoflood.hpp>
 
 #include "algorithm.hpp"
 #include "best-route-strategy.hpp"
@@ -48,13 +51,17 @@ getDefaultStrategyName()
   return fw::BestRouteStrategy::getStrategyName();
 }
 
-Forwarder::Forwarder(FaceTable& faceTable)
-  : m_faceTable(faceTable)
+Forwarder::Forwarder(Config& config, Controller& controller)
+  : m_controller(controller)
+  , m_faceTable(m_faceTable)
   , m_unsolicitedDataPolicy(make_unique<fw::DefaultUnsolicitedDataPolicy>())
   , m_fib(m_nameTree)
   , m_pit(m_nameTree)
   , m_measurements(m_nameTree)
   , m_strategyChoice(*this)
+  , m_networkRegionTable(m_faceTable, m_fib, m_rib)
+  , m_tfibCleanupEvent(m_scheduler, bind(&table::Tfib::cleanup, &m_tfib))
+  , m_floodRateResetEvent(m_scheduler, bind(&RateLimitMap::clear, &m_floodRateMap))
 {
   m_faceTable.afterAdd.connect([this] (const Face& face) {
     face.afterReceiveInterest.connect(
@@ -84,6 +91,8 @@ Forwarder::Forwarder(FaceTable& faceTable)
   });
 
   m_strategyChoice.setDefaultStrategy(getDefaultStrategyName());
+  m_tfibCleanupEvent.schedulePeriodic(TFIB_CLEANUP_INTERVAL);
+  m_floodRateResetEvent.schedulePeriodic(FLOOD_RATE_RESET_INTERVAL);
 }
 
 void
@@ -223,6 +232,22 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   // dispatch to strategy: after receive Interest
   m_strategyChoice.findEffectiveStrategy(*pitEntry)
     .afterReceiveInterest(interest, FaceEndpoint(ingress.face), pitEntry);
+
+  const fib::Entry* fibEntry = m_fib.findLongestPrefixMatch(*pitEntry);
+
+  if (fibEntry == nullptr || fibEntry->getNextHops().empty()) {
+    // FIB miss or no nexthops, check TFIB
+    if (auto* tfibEntry = m_tfib.findLongestPrefixMatch(interest.getName())) {
+      onOutgoingInterest(interest, tfibEntry->getFace(), pitEntry);
+      return; // Forwarded using TFIB
+    }
+    
+    // If both FIB and TFIB miss, consider flooding
+    if (shouldFloodInterest(interest)) {
+      handleInterestFlooding(interest, ingress, pitEntry);
+      return; // Flooding handled
+    }
+  }
 }
 
 void
@@ -310,6 +335,15 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     return;
   }
 
+  // OptoFlood: Check for mobility flag and handle accordingly
+  if (optoflood::hasMobilityFlag(data.getMetaInfo())) {
+    // Make a mutable copy for tag modification
+    Data mutableData = data;
+    handleOptoFloodData(mutableData, ingress);
+    // After flooding, we still let the Data packet proceed through the normal path
+    // to satisfy any matching PIT entries.
+  }
+  
   // PIT match
   pit::DataMatchResult pitMatches = m_pit.findAllDataMatches(data);
   if (pitMatches.size() == 0) {
@@ -624,6 +658,84 @@ Forwarder::processConfig(const ConfigSection& configSection, bool isDryRun, cons
   if (!isDryRun) {
     m_config = config;
   }
+}
+
+// --- OptoFlood Implementation ---
+
+void
+Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
+{
+  auto floodIdOpt = optoflood::getFloodId(data.getMetaInfo());
+  if (!floodIdOpt) {
+    return; // Malformed, no FloodId
+  }
+  
+  // Deduplication
+  if (m_floodIdCache.count(*floodIdOpt) > 0) {
+    return; // Already processed this flood packet
+  }
+  m_floodIdCache.insert(*floodIdOpt);
+
+  // Rate Limiting
+  if (!checkFloodRate(data.getName().getPrefix(-1))) {
+    return; // Rate limit exceeded for this producer
+  }
+
+  // Update TFIB
+  if (auto newFaceSeqOpt = optoflood::getNewFaceSeq(data.getMetaInfo())) {
+    m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
+    // Potentially trigger NLSR update here
+  }
+  
+  // Controlled Flooding
+  uint8_t hopLimit = data.getTag<lp::HopLimitTag>().get_value_or(OPTOFLOOD_HOP_LIMIT);
+
+  if (hopLimit > 0) {
+    data.setTag(make_shared<lp::HopLimitTag>(hopLimit - 1));
+    for (auto& face : m_faceTable) {
+      if (face->getId() != ingress.face.getId() && face->getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+         sendData(*face, data);
+      }
+    }
+  }
+}
+
+bool
+Forwarder::shouldFloodInterest(const Interest& interest)
+{
+  // Basic implementation: for now, we assume an application-level flag
+  // would be present to indicate a floodable interest.
+  // A real implementation would check for a specific TLV in ApplicationParameters.
+  return false; // Disabled by default to prevent network-wide flooding
+}
+
+void
+Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
+                                  const shared_ptr<pit::Entry>& pitEntry)
+{
+  Interest floodInterest = interest;
+  floodInterest.setHopLimit(OPTOFLOOD_HOP_LIMIT);
+
+  for (auto& face : m_faceTable) {
+    if (face->getId() != ingress.face.getId() && face->getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+      onOutgoingInterest(floodInterest, *face, pitEntry);
+    }
+  }
+}
+
+bool
+Forwarder::checkFloodRate(const Name& producerPrefix)
+{
+  m_floodRateMap[producerPrefix]++;
+  return m_floodRateMap.at(producerPrefix) <= OPTOFLOOD_RATE_LIMIT;
+}
+
+void
+Forwarder::onFaceAdded(const Face& face)
+{
+  // Existing onFaceAdded logic...
+  // For TFIB, when a face is added, there's no immediate action needed.
+  // Removal is handled by erase().
 }
 
 } // namespace nfd

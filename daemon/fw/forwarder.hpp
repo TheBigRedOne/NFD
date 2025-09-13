@@ -38,6 +38,9 @@
 #include "table/strategy-choice.hpp"
 #include "table/dead-nonce-list.hpp"
 #include "table/network-region-table.hpp"
+#include "table/tfib.hpp"
+
+#include <ndn-cxx/lp/tags.hpp>
 
 namespace nfd {
 
@@ -208,6 +211,9 @@ NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE: // pipelines
   NFD_VIRTUAL_WITH_TESTS void
   onNewNextHop(const Name& prefix, const fib::NextHop& nextHop);
 
+  NFD_VIRTUAL_WITH_TESTS void
+  onFaceAdded(const Face& face);
+
 private:
   /** \brief Set a new expiry timer (now + \p duration) on a PIT entry.
    */
@@ -224,6 +230,27 @@ private:
   void
   processConfig(const ConfigSection& configSection, bool isDryRun,
                 const std::string& filename);
+
+  void
+  onContentStoreHit(const Interest& interest, const FaceEndpoint& ingress,
+                    const shared_ptr<pit::Entry>& pitEntry, const shared_ptr<const CsEntry>& csEntry);
+  void
+  onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingress,
+                     const shared_ptr<pit::Entry>& pitEntry);
+  void
+  onSatisfiedInterest(const shared_ptr<pit::Entry>& pitEntry,
+                      const FaceEndpoint& ingress, const Data& data);
+
+  // OptoFlood extension methods
+  void
+  handleOptoFloodData(Data data, const FaceEndpoint& ingress);
+  void
+  handleInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
+                         const shared_ptr<pit::Entry>& pitEntry);
+  bool
+  shouldFloodInterest(const Interest& interest);
+  bool
+  checkFloodRate(const Name& producerPrefix);
 
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
@@ -251,6 +278,24 @@ private:
   StrategyChoice     m_strategyChoice;
   DeadNonceList      m_deadNonceList;
   NetworkRegionTable m_networkRegionTable;
+
+  // OptoFlood members
+  table::Tfib m_tfib;
+  Scheduler m_tfibCleanupEvent;
+
+  // Flood control members
+  using FloodIdCache = std::unordered_set<uint64_t>;
+  FloodIdCache m_floodIdCache;
+
+  using RateLimitMap = std::unordered_map<Name, size_t, NameHash>;
+  RateLimitMap m_floodRateMap;
+  Scheduler m_floodRateResetEvent;
+
+  // OptoFlood constants
+  static constexpr time::milliseconds TFIB_CLEANUP_INTERVAL = 100_ms;
+  static constexpr time::seconds FLOOD_RATE_RESET_INTERVAL = 1_s;
+  static constexpr uint8_t OPTOFLOOD_HOP_LIMIT = 3;
+  static constexpr size_t OPTOFLOOD_RATE_LIMIT = 100; // packets per second
 
   // allow Strategy (base class) to enter pipelines
   friend ::nfd::fw::Strategy;
