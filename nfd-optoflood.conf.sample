@@ -1,0 +1,31 @@
+# This is a sample configuration file for the OptoFlood extension in NFD.
+# To use it, you can include this file from your main nfd.conf,
+# or copy the 'optoflood' section into your existing configuration.
+
+# =================================================================
+# OptoFlood settings for producer mobility
+# =================================================================
+optoflood
+{
+    # Enable or disable the OptoFlood mechanism.
+    # Disabling this will make the forwarder behave as a standard NFD.
+    # enable no (default: yes)
+    enable yes
+
+    # The maximum number of hops a flooded packet (Data or Interest) can travel.
+    # This is a critical parameter to control the scope of the flood.
+    # A value of 3 is recommended for typical campus or access networks.
+    # hop_limit 1-255 (default: 3)
+    hop_limit 3
+
+    # The maximum number of flooded packets allowed per producer per second.
+    # This acts as a rate limit to prevent network abuse or DoS attacks.
+    # rate_limit <non-negative-integer> (default: 100)
+    rate_limit 100
+
+    # The lifetime of temporary forwarding entries created in the TFIB, in milliseconds.
+    # This value should be long enough to rescue in-flight Interests, but short
+    # enough to not interfere with converged global routing from NLSR.
+    # tfib_lifetime_ms <non-negative-integer> (default: 1000)
+    tfib_lifetime_ms 1000
+}
