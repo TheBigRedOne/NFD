@@ -684,7 +684,6 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
   // Update TFIB
   if (auto newFaceSeqOpt = optoflood::getNewFaceSeq(data.getMetaInfo())) {
     m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
-    // Potentially trigger NLSR update here
   }
   
   // Controlled Flooding
@@ -703,10 +702,9 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
 bool
 Forwarder::shouldFloodInterest(const Interest& interest)
 {
-  // Basic implementation: for now, we assume an application-level flag
-  // would be present to indicate a floodable interest.
-  // A real implementation would check for a specific TLV in ApplicationParameters.
-  return false; // Disabled by default to prevent network-wide flooding
+  // Trigger Interest flooding only if the consumer has explicitly requested it
+  // by adding a specific marker to the ApplicationParameters.
+  return optoflood::isInterestFloodRequested(interest);
 }
 
 void
