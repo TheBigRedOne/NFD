@@ -44,9 +44,13 @@
 #include <ndn-cxx/name.hpp>
 #include <ndn-cxx/util/scheduler.hpp>
 
-#include "table/cs-entry.hpp"
+// #include "table/cs-entry.hpp" // Removed to break circular dependency
 
 namespace nfd {
+
+namespace table {
+class CsEntry; // Forward declaration
+}
 
 namespace fw {
 class Strategy;

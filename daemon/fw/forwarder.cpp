@@ -28,6 +28,8 @@
 #include "daemon/mgmt/ndn-ctrl-command.hpp"
 #include <ndn-cxx/optoflood.hpp>
 
+#include "table/cs-entry.hpp" // Added to provide full definition for CsEntry
+
 #include "algorithm.hpp"
 #include "best-route-strategy.hpp"
 #include "scope-prefix.hpp"

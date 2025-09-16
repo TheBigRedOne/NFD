@@ -28,6 +28,7 @@
 
 #include "forwarder.hpp"
 #include "table/measurements-accessor.hpp"
+#include "table/cs-entry.hpp" // Added to provide CsEntry definition to all strategies
 
 #include <boost/lexical_cast/try_lexical_convert.hpp>
 
