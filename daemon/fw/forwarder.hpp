@@ -41,6 +41,10 @@
 #include "table/tfib.hpp"
 
 #include <ndn-cxx/lp/tags.hpp>
+#include <ndn-cxx/name.hpp>
+#include <ndn-cxx/util/scheduler.hpp>
+
+#include "table/cs-entry.hpp"
 
 namespace nfd {
 

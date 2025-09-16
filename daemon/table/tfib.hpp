@@ -35,7 +35,7 @@ public:
   Face&
   getFace() const { return m_face; }
 
-  const time::steady_clock::TimePoint&
+  const time::steady_clock::time_point&
   getExpiry() const { return m_expiry; }
 
   uint32_t
@@ -44,10 +44,11 @@ public:
   uint64_t
   getFloodId() const { return m_floodId; }
 
-private:
+public:
+  // These members must be public for boost::multi_index::member
   Name m_prefix;
   Face& m_face;
-  time::steady_clock::TimePoint m_expiry;
+  time::steady_clock::time_point m_expiry;
   uint32_t m_newFaceSeq;
   uint64_t m_floodId;
 };
@@ -96,11 +97,13 @@ private:
     boost::multi_index::indexed_by<
       boost::multi_index::ordered_unique<
         boost::multi_index::tag<Prefix_>,
-        boost::multi_index::member<TfibEntry, const Name, &TfibEntry::m_prefix>,
-        Name::Compare>,
+        boost::multi_index::member<TfibEntry, const Name, &TfibEntry::m_prefix>
+        // Default std::less<Name> is sufficient as ndn::Name is comparable
+      >,
       boost::multi_index::ordered_non_unique<
         boost::multi_index::tag<Expiry_>,
-        boost::multi_index::member<TfibEntry, const time::steady_clock::TimePoint, &TfibEntry::m_expiry>>
+        boost::multi_index::member<TfibEntry, time::steady_clock::time_point, &TfibEntry::m_expiry>
+      >
     >
   >;
 
