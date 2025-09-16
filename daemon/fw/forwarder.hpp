@@ -237,7 +237,7 @@ private:
 
   void
   onContentStoreHit(const Interest& interest, const FaceEndpoint& ingress,
-                    const shared_ptr<pit::Entry>& pitEntry, const shared_ptr<const CsEntry>& csEntry);
+                    const shared_ptr<pit::Entry>& pitEntry, const shared_ptr<const table::CsEntry>& csEntry);
   void
   onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingress,
                      const shared_ptr<pit::Entry>& pitEntry);
@@ -285,15 +285,15 @@ private:
 
   // OptoFlood members
   table::Tfib m_tfib;
-  Scheduler m_tfibCleanupEvent;
+  ndn::Scheduler m_tfibCleanupEvent;
 
   // Flood control members
   using FloodIdCache = std::unordered_set<uint64_t>;
   FloodIdCache m_floodIdCache;
 
-  using RateLimitMap = std::unordered_map<Name, size_t, NameHash>;
+  using RateLimitMap = std::unordered_map<Name, size_t, ndn::NameHash>;
   RateLimitMap m_floodRateMap;
-  Scheduler m_floodRateResetEvent;
+  ndn::Scheduler m_floodRateResetEvent;
 
   // OptoFlood constants
   static constexpr time::milliseconds TFIB_CLEANUP_INTERVAL = 100_ms;
