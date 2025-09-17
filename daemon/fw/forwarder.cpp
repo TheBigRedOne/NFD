@@ -731,7 +731,7 @@ Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& 
 }
 
 bool
-Forwarder::checkFloodRate(const Name& producerPrefix)
+Forwarder::checkFloodRate(const ndn::Name& producerPrefix)
 {
   m_floodRateMap[producerPrefix]++;
   return m_floodRateMap.at(producerPrefix) <= OPTOFLOOD_RATE_LIMIT;

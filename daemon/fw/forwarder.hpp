@@ -256,7 +256,7 @@ private:
   bool
   shouldFloodInterest(const Interest& interest);
   bool
-  checkFloodRate(const Name& producerPrefix);
+  checkFloodRate(const ndn::Name& producerPrefix);
 
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
@@ -287,15 +287,15 @@ private:
 
   // OptoFlood members
   table::Tfib m_tfib;
-  Scheduler::EventId m_tfibCleanupEvent;
+  ndn::Scheduler::EventId m_tfibCleanupEvent;
 
   // Flood control members
   using FloodIdCache = std::unordered_set<uint64_t>;
   FloodIdCache m_floodIdCache;
 
-  using RateLimitMap = std::unordered_map<Name, size_t, name::Hash>;
+  using RateLimitMap = std::unordered_map<ndn::Name, size_t, ndn::name::Hash>;
   RateLimitMap m_floodRateMap;
-  Scheduler::EventId m_floodRateResetEvent;
+  ndn::Scheduler::EventId m_floodRateResetEvent;
 
   // OptoFlood constants
   static constexpr time::milliseconds TFIB_CLEANUP_INTERVAL = 100_ms;
