@@ -287,15 +287,15 @@ private:
 
   // OptoFlood members
   table::Tfib m_tfib;
-  ndn::Scheduler m_tfibCleanupEvent;
+  Scheduler::EventId m_tfibCleanupEvent;
 
   // Flood control members
   using FloodIdCache = std::unordered_set<uint64_t>;
   FloodIdCache m_floodIdCache;
 
-  using RateLimitMap = std::unordered_map<Name, size_t>; // Corrected: std::hash<Name> is used by default
+  using RateLimitMap = std::unordered_map<Name, size_t, name::Hash>;
   RateLimitMap m_floodRateMap;
-  ndn::Scheduler m_floodRateResetEvent;
+  Scheduler::EventId m_floodRateResetEvent;
 
   // OptoFlood constants
   static constexpr time::milliseconds TFIB_CLEANUP_INTERVAL = 100_ms;

@@ -58,9 +58,16 @@ Forwarder::Forwarder(FaceTable& faceTable)
   , m_pit(m_nameTree)
   , m_measurements(m_nameTree)
   , m_strategyChoice(*this)
-  , m_tfibCleanupEvent(Global::getScheduler(), bind(&table::Tfib::cleanup, &m_tfib))
-  , m_floodRateResetEvent(Global::getScheduler(), bind(&RateLimitMap::clear, &m_floodRateMap))
 {
+  m_tfibCleanupEvent = getScheduler().schedule(TFIB_CLEANUP_INTERVAL, [this] {
+    m_tfib.cleanup();
+    m_tfibCleanupEvent.reschedule(TFIB_CLEANUP_INTERVAL);
+  });
+  m_floodRateResetEvent = getScheduler().schedule(FLOOD_RATE_RESET_INTERVAL, [this] {
+    m_floodRateMap.clear();
+    m_floodRateResetEvent.reschedule(FLOOD_RATE_RESET_INTERVAL);
+  });
+
   m_faceTable.afterAdd.connect([this] (const Face& face) {
     face.afterReceiveInterest.connect(
       [this, &face] (const Interest& interest, const EndpointId& endpointId) {
@@ -89,8 +96,6 @@ Forwarder::Forwarder(FaceTable& faceTable)
   });
 
   m_strategyChoice.setDefaultStrategy(getDefaultStrategyName());
-  m_tfibCleanupEvent.schedulePeriodic(TFIB_CLEANUP_INTERVAL);
-  m_floodRateResetEvent.schedulePeriodic(FLOOD_RATE_RESET_INTERVAL);
 }
 
 void
@@ -231,9 +236,9 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   m_strategyChoice.findEffectiveStrategy(*pitEntry)
     .afterReceiveInterest(interest, FaceEndpoint(ingress.face), pitEntry);
 
-  const fib::Entry* fibEntry = m_fib.findLongestPrefixMatch(*pitEntry);
+  const fib::Entry& fibEntry = m_fib.findLongestPrefixMatch(*pitEntry);
 
-  if (fibEntry == nullptr || fibEntry->getNextHops().empty()) {
+  if (!fibEntry.hasNextHops()) {
     // FIB miss or no nexthops, check TFIB
     if (auto* tfibEntry = m_tfib.findLongestPrefixMatch(interest.getName())) {
       onOutgoingInterest(interest, tfibEntry->getFace(), pitEntry);
@@ -686,7 +691,7 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
   
   // Controlled Flooding
   uint8_t hopLimit;
-  if (auto hopLimitTag = data.getTag<lp::HopLimitTag>()) {
+  if (auto hopLimitTag = data.getTag<::ndn::lp::HopLimitTag>()) {
     hopLimit = hopLimitTag->get();
   }
   else {
@@ -694,10 +699,10 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
   }
 
   if (hopLimit > 0) {
-    data.setTag(make_shared<lp::HopLimitTag>(hopLimit - 1));
+    data.setTag(make_shared<::ndn::lp::HopLimitTag>(hopLimit - 1));
     for (auto& face : m_faceTable) {
-      if (face->getId() != ingress.face.getId() && face->getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
-         face->sendData(data);
+      if (face.getId() != ingress.face.getId() && face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+         face.sendData(data);
       }
     }
   }
@@ -719,8 +724,8 @@ Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& 
   floodInterest.setHopLimit(OPTOFLOOD_HOP_LIMIT);
 
   for (auto& face : m_faceTable) {
-    if (face->getId() != ingress.face.getId() && face->getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
-      onOutgoingInterest(floodInterest, *face, pitEntry);
+    if (face.getId() != ingress.face.getId() && face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+      onOutgoingInterest(floodInterest, face, pitEntry);
     }
   }
 }
