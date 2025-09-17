@@ -239,6 +239,13 @@ private:
   processConfig(const ConfigSection& configSection, bool isDryRun,
                 const std::string& filename);
 
+  // Periodic schedulers for OptoFlood housekeeping
+  void
+  scheduleTfibCleanup();
+
+  void
+  scheduleFloodRateReset();
+
   void
   onContentStoreHit(const Interest& interest, const FaceEndpoint& ingress,
                     const shared_ptr<pit::Entry>& pitEntry, const shared_ptr<const table::CsEntry>& csEntry);
@@ -287,15 +294,15 @@ private:
 
   // OptoFlood members
   table::Tfib m_tfib;
-  ndn::Scheduler::EventId m_tfibCleanupEvent;
+  ndn::scheduler::ScopedEventId m_tfibCleanupEvent;
 
   // Flood control members
   using FloodIdCache = std::unordered_set<uint64_t>;
   FloodIdCache m_floodIdCache;
 
-  using RateLimitMap = std::unordered_map<ndn::Name, size_t, ndn::name::Hash>;
+  using RateLimitMap = std::unordered_map<ndn::Name, size_t>;
   RateLimitMap m_floodRateMap;
-  ndn::Scheduler::EventId m_floodRateResetEvent;
+  ndn::scheduler::ScopedEventId m_floodRateResetEvent;
 
   // OptoFlood constants
   static constexpr time::milliseconds TFIB_CLEANUP_INTERVAL = 100_ms;

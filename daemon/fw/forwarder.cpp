@@ -59,14 +59,8 @@ Forwarder::Forwarder(FaceTable& faceTable)
   , m_measurements(m_nameTree)
   , m_strategyChoice(*this)
 {
-  m_tfibCleanupEvent = getScheduler().schedule(TFIB_CLEANUP_INTERVAL, [this] {
-    m_tfib.cleanup();
-    m_tfibCleanupEvent.reschedule(TFIB_CLEANUP_INTERVAL);
-  });
-  m_floodRateResetEvent = getScheduler().schedule(FLOOD_RATE_RESET_INTERVAL, [this] {
-    m_floodRateMap.clear();
-    m_floodRateResetEvent.reschedule(FLOOD_RATE_RESET_INTERVAL);
-  });
+  scheduleTfibCleanup();
+  scheduleFloodRateReset();
 
   m_faceTable.afterAdd.connect([this] (const Face& face) {
     face.afterReceiveInterest.connect(
@@ -96,6 +90,23 @@ Forwarder::Forwarder(FaceTable& faceTable)
   });
 
   m_strategyChoice.setDefaultStrategy(getDefaultStrategyName());
+}
+void
+Forwarder::scheduleTfibCleanup()
+{
+  m_tfibCleanupEvent = getScheduler().schedule(TFIB_CLEANUP_INTERVAL, [this] {
+    m_tfib.cleanup();
+    scheduleTfibCleanup();
+  });
+}
+
+void
+Forwarder::scheduleFloodRateReset()
+{
+  m_floodRateResetEvent = getScheduler().schedule(FLOOD_RATE_RESET_INTERVAL, [this] {
+    m_floodRateMap.clear();
+    scheduleFloodRateReset();
+  });
 }
 
 void
