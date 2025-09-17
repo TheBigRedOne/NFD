@@ -13,9 +13,12 @@
 #include <boost/multi_index/member.hpp>
 
 namespace nfd {
-namespace table {
 
-class Face;
+namespace face {
+class Face; // Correct forward declaration in the correct namespace
+}
+
+namespace table {
 
 /**
  * @brief An entry in the Temporary Forwarding Information Base (TFIB).
@@ -26,13 +29,13 @@ public:
   /**
    * @brief Constructs a TFIB entry.
    */
-  TfibEntry(const Name& prefix, Face& face,
+  TfibEntry(const Name& prefix, face::Face& face,
             uint32_t newFaceSeq, uint64_t floodId);
 
   const Name&
   getPrefix() const { return m_prefix; }
 
-  Face&
+  face::Face&
   getFace() const { return m_face; }
 
   const time::steady_clock::time_point&
@@ -47,7 +50,7 @@ public:
 public:
   // These members must be public for boost::multi_index::member
   Name m_prefix;
-  Face& m_face;
+  face::Face& m_face;
   time::steady_clock::time_point m_expiry;
   uint32_t m_newFaceSeq;
   uint64_t m_floodId;
@@ -74,13 +77,13 @@ public:
    * newFaceSeq is greater than the existing one.
    */
   void
-  insert(const Name& prefix, Face& face, uint32_t seq, uint64_t floodId);
+  insert(const Name& prefix, face::Face& face, uint32_t seq, uint64_t floodId);
   
   /**
    * @brief Erases all entries whose nexthop is the specified face.
    */
   void
-  erase(const Face& face);
+  erase(const face::Face& face);
   
   /**
    * @brief Removes all expired entries from the TFIB.
