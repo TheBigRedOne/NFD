@@ -24,8 +24,6 @@
  */
 
 #include "forwarder.hpp"
-#include "daemon/mgmt/controller.hpp"
-#include "daemon/mgmt/ndn-ctrl-command.hpp"
 #include <ndn-cxx/optoflood.hpp>
 
 #include "table/cs-entry.hpp" // Added to provide full definition for CsEntry
@@ -336,7 +334,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
   }
 
   // OptoFlood: Check for mobility flag and handle accordingly
-  if (optoflood::hasMobilityFlag(data.getMetaInfo())) {
+  if (::ndn::optoflood::hasMobilityFlag(data.getMetaInfo())) {
     // Make a mutable copy for tag modification
     Data mutableData = data;
     handleOptoFloodData(mutableData, ingress);
@@ -665,7 +663,7 @@ Forwarder::processConfig(const ConfigSection& configSection, bool isDryRun, cons
 void
 Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
 {
-  auto floodIdOpt = optoflood::getFloodId(data.getMetaInfo());
+  auto floodIdOpt = ::ndn::optoflood::getFloodId(data.getMetaInfo());
   if (!floodIdOpt) {
     return; // Malformed, no FloodId
   }
@@ -682,18 +680,24 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
   }
 
   // Update TFIB
-  if (auto newFaceSeqOpt = optoflood::getNewFaceSeq(data.getMetaInfo())) {
+  if (auto newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo())) {
     m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
   }
   
   // Controlled Flooding
-  uint8_t hopLimit = data.getTag<lp::HopLimitTag>().get_value_or(OPTOFLOOD_HOP_LIMIT);
+  uint8_t hopLimit;
+  if (auto hopLimitTag = data.getTag<lp::HopLimitTag>()) {
+    hopLimit = hopLimitTag->get();
+  }
+  else {
+    hopLimit = OPTOFLOOD_HOP_LIMIT;
+  }
 
   if (hopLimit > 0) {
     data.setTag(make_shared<lp::HopLimitTag>(hopLimit - 1));
     for (auto& face : m_faceTable) {
       if (face->getId() != ingress.face.getId() && face->getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
-         sendData(*face, data);
+         face->sendData(data);
       }
     }
   }
@@ -704,7 +708,7 @@ Forwarder::shouldFloodInterest(const Interest& interest)
 {
   // Trigger Interest flooding only if the consumer has explicitly requested it
   // by adding a specific marker to the ApplicationParameters.
-  return optoflood::isInterestFloodRequested(interest);
+  return ::ndn::optoflood::isInterestFloodRequested(interest);
 }
 
 void
