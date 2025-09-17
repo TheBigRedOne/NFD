@@ -24,7 +24,7 @@
  */
 
 #include "forwarder.hpp"
-#include "mgmt/controller.hpp"
+#include "daemon/mgmt/controller.hpp"
 #include "daemon/mgmt/ndn-ctrl-command.hpp"
 #include <ndn-cxx/optoflood.hpp>
 
@@ -53,17 +53,15 @@ getDefaultStrategyName()
   return fw::BestRouteStrategy::getStrategyName();
 }
 
-Forwarder::Forwarder(Config& config, Controller& controller)
-  : m_controller(controller)
-  , m_faceTable(m_faceTable)
+Forwarder::Forwarder(FaceTable& faceTable)
+  : m_faceTable(faceTable)
   , m_unsolicitedDataPolicy(make_unique<fw::DefaultUnsolicitedDataPolicy>())
   , m_fib(m_nameTree)
   , m_pit(m_nameTree)
   , m_measurements(m_nameTree)
   , m_strategyChoice(*this)
-  , m_networkRegionTable(m_faceTable, m_fib, m_rib)
-  , m_tfibCleanupEvent(m_scheduler, bind(&table::Tfib::cleanup, &m_tfib))
-  , m_floodRateResetEvent(m_scheduler, bind(&RateLimitMap::clear, &m_floodRateMap))
+  , m_tfibCleanupEvent(Global::getScheduler(), bind(&table::Tfib::cleanup, &m_tfib))
+  , m_floodRateResetEvent(Global::getScheduler(), bind(&RateLimitMap::clear, &m_floodRateMap))
 {
   m_faceTable.afterAdd.connect([this] (const Face& face) {
     face.afterReceiveInterest.connect(
