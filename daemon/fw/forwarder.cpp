@@ -24,7 +24,7 @@
  */
 
 #include "forwarder.hpp"
-#include "daemon/mgmt/controller.hpp"
+#include "mgmt/controller.hpp"
 #include "daemon/mgmt/ndn-ctrl-command.hpp"
 #include <ndn-cxx/optoflood.hpp>
 

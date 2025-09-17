@@ -242,11 +242,7 @@ private:
   void
   onContentStoreHit(const Interest& interest, const FaceEndpoint& ingress,
                     const shared_ptr<pit::Entry>& pitEntry, const shared_ptr<const table::CsEntry>& csEntry);
-  /* This is a duplicate and will be removed. The original is on line 163.
-  void
-  onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingress,
-                     const shared_ptr<pit::Entry>& pitEntry);
-  */
+  
   void
   onSatisfiedInterest(const shared_ptr<pit::Entry>& pitEntry,
                       const FaceEndpoint& ingress, const Data& data);
@@ -297,7 +293,7 @@ private:
   using FloodIdCache = std::unordered_set<uint64_t>;
   FloodIdCache m_floodIdCache;
 
-  using RateLimitMap = std::unordered_map<Name, size_t>;
+  using RateLimitMap = std::unordered_map<Name, size_t>; // Corrected: std::hash<Name> is used by default
   RateLimitMap m_floodRateMap;
   ndn::Scheduler m_floodRateResetEvent;
 
