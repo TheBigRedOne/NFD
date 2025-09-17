@@ -179,6 +179,11 @@ GenericLinkService::encodeLpFields(const ndn::PacketBase& netPkt, lp::Packet& lp
   if (pitToken != nullptr) {
     lpPacket.add<lp::PitTokenField>(*pitToken);
   }
+
+  // OptoFlood: encode experimental data-hop-limit onto LpPacket if present
+  if (const auto hop = netPkt.getTag<lp::OptoHopLimit>()) {
+    lpPacket.add<lp::OptoHopLimitField>(*hop);
+  }
 }
 
 void
@@ -454,6 +459,11 @@ GenericLinkService::decodeData(const Block& netPkt, const lp::Packet& firstPkt,
     else {
       NFD_LOG_FACE_WARN("received PrefixAnnouncement, but self-learning disabled: IGNORE");
     }
+  }
+
+  // OptoFlood: decode experimental OptoHopLimit from LpPacket onto Data tag
+  if (firstPkt.has<lp::OptoHopLimitField>()) {
+    data->setTag(make_shared<lp::OptoHopLimit>(firstPkt.get<lp::OptoHopLimitField>()));
   }
 
   this->receiveData(*data, endpointId);

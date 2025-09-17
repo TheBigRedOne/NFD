@@ -699,22 +699,25 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
   if (auto newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo())) {
     m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
   }
-  
-  // Controlled Flooding
-  uint8_t hopLimit;
-  if (auto hopLimitTag = data.getTag<::ndn::lp::HopLimitTag>()) {
-    hopLimit = hopLimitTag->get();
+
+  // Controlled Flooding (multi-hop via LP OptoHopLimit, local scope per-hop)
+  uint64_t hopLimit = 0;
+  if (auto tag = data.getTag<ndn::lp::OptoHopLimit>()) {
+    hopLimit = *tag;
   }
   else {
-    hopLimit = OPTOFLOOD_HOP_LIMIT;
+    hopLimit = OPTOFLOOD_HOP_LIMIT; // default for Data flooding
   }
 
-  if (hopLimit > 0) {
-    data.setTag(make_shared<::ndn::lp::HopLimitTag>(hopLimit - 1));
-    for (auto& face : m_faceTable) {
-      if (face.getId() != ingress.face.getId() && face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
-         face.sendData(data);
-      }
+  if (hopLimit == 0) {
+    return;
+  }
+
+  // decrement and forward locally
+  data.setTag(std::make_shared<ndn::lp::OptoHopLimit>(hopLimit - 1));
+  for (auto& face : m_faceTable) {
+    if (face.getId() != ingress.face.getId() && face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+      face.sendData(data);
     }
   }
 }
@@ -732,7 +735,12 @@ Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& 
                                   const shared_ptr<pit::Entry>& pitEntry)
 {
   Interest floodInterest = interest;
-  floodInterest.setHopLimit(OPTOFLOOD_HOP_LIMIT);
+  if (auto reqHop = ::ndn::optoflood::getFloodHopLimit(interest)) {
+    floodInterest.setHopLimit(*reqHop);
+  }
+  else {
+    floodInterest.setHopLimit(OPTOFLOOD_HOP_LIMIT);
+  }
 
   for (auto& face : m_faceTable) {
     if (face.getId() != ingress.face.getId() && face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
