@@ -295,7 +295,7 @@ private:
   using FloodIdCache = std::unordered_set<uint64_t>;
   FloodIdCache m_floodIdCache;
 
-  using RateLimitMap = std::unordered_map<Name, size_t, ndn::NameHash>;
+  using RateLimitMap = std::unordered_map<Name, size_t>;
   RateLimitMap m_floodRateMap;
   ndn::Scheduler m_floodRateResetEvent;
 
