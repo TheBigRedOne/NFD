@@ -265,10 +265,6 @@ private:
   bool
   checkFloodRate(const ndn::Name& producerPrefix);
 
-  // Trigger Fast-LSA in NLSR via localhost management command
-  void
-  triggerFastLsa(const ndn::Name& prefix, uint32_t newFaceSeq);
-
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
    * \brief Configuration options from the `forwarder` section.

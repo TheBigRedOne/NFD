@@ -698,8 +698,6 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
   // Update TFIB
   if (auto newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo())) {
     m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
-    // Trigger Fast-LSA via localhost command
-    triggerFastLsa(data.getName().getPrefix(-1), *newFaceSeqOpt);
   }
 
   // Controlled Flooding (multi-hop via LP OptoHopLimit, local scope per-hop)
@@ -724,25 +722,6 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
   }
 }
 
-void
-Forwarder::triggerFastLsa(const ndn::Name& prefix, uint32_t newFaceSeq)
-{
-  try {
-    // Use NLSR local management command: /localhost/nlsr/fast-lsa/trigger
-    ndn::Name cmdName("/localhost/nlsr/fast-lsa/trigger");
-    ndn::nfd::ControlParameters params;
-    params.setName(prefix)
-          .setExpirationPeriod(1000_ms)
-          .setCost(newFaceSeq);
-    // Fire-and-forget; failures are logged but do not affect dataplane
-    m_controller.start<ndn::nfd::GeneralCommand>(cmdName, params,
-      [] (const auto&) {},
-      [] (const auto&) {});
-  }
-  catch (...) {
-    // silent-ignore to avoid interfering dataplane
-  }
-}
 
 bool
 Forwarder::shouldFloodInterest(const Interest& interest)
