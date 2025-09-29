@@ -713,12 +713,51 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
     return;
   }
 
-  // decrement and forward locally
+  // decrement and forward according to policy:
+  // (1) Prefer FIB next-hops (non-LOCAL), excluding ingress
+  // (2) If no FIB next-hops, fallback to adjacent faces (non-LOCAL), excluding ingress
   data.setTag(std::make_shared<ndn::lp::OptoHopLimit>(hopLimit - 1));
-  for (auto& face : m_faceTable) {
-    if (face.getId() != ingress.face.getId() && face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
-      face.sendData(data);
+
+  std::vector<Face*> outFaces;
+  outFaces.reserve(8);
+
+  const Name floodPrefix = data.getName().getPrefix(-1);
+  const auto& fibEntry = m_fib.findLongestPrefixMatch(floodPrefix);
+  if (fibEntry.hasNextHops()) {
+    // Use FIB next hops first
+    for (const auto& nh : fibEntry.getNextHops()) {
+      Face& out = nh.getFace();
+      if (out.getId() == ingress.face.getId()) {
+        continue;
+      }
+      if (out.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+        continue;
+      }
+      outFaces.push_back(&out);
     }
+  }
+
+  if (outFaces.empty()) {
+    // Fallback to adjacent faces (exclude LOCAL and ingress)
+    for (auto& f : m_faceTable) {
+      if (f.getId() == ingress.face.getId()) {
+        continue;
+      }
+      if (f.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+        continue;
+      }
+      outFaces.push_back(&f);
+    }
+  }
+
+  // Deduplicate and send
+  std::unordered_set<uint64_t> sentIds;
+  for (Face* f : outFaces) {
+    if (!f) continue;
+    if (!sentIds.insert(f->getId()).second) {
+      continue;
+    }
+    f->sendData(data);
   }
 }
 
