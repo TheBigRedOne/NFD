@@ -349,8 +349,8 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     return;
   }
 
-  // OptoFlood: Check for mobility flag and handle accordingly
-  if (::ndn::optoflood::hasMobilityFlag(data.getMetaInfo())) {
+  // OptoFlood: Check for mobility via LP tag or legacy MetaInfo flag and handle accordingly
+  if (data.getTag<ndn::lp::OptoMobilityFlag>() != nullptr || ::ndn::optoflood::hasMobilityFlag(data.getMetaInfo())) {
     // Make a mutable copy for tag modification
     Data mutableData = data;
     handleOptoFloodData(mutableData, ingress);
@@ -390,6 +390,12 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
     // delete PIT entry's out-record
     pitEntry->deleteOutRecord(ingress.face);
+
+    // OptoFlood: at PIT hit, clear LP mobility semantics on the outgoing copies (stop flooding)
+    // The clearing is realized by not re-attaching LP tags when sending via GenericLinkService
+    // and by removing tags from the in-memory Data before onOutgoingData.
+    const_cast<Data&>(data).removeTag<ndn::lp::OptoMobilityFlag>();
+    const_cast<Data&>(data).removeTag<ndn::lp::OptoHopLimit>();
   }
   // when more than one PIT entry is matched, trigger strategy: before satisfy Interest,
   // and send Data to all matched out faces
@@ -717,6 +723,8 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
   // (1) Prefer FIB next-hops (non-LOCAL), excluding ingress
   // (2) If no FIB next-hops, fallback to adjacent faces (non-LOCAL), excluding ingress
   data.setTag(std::make_shared<ndn::lp::OptoHopLimit>(hopLimit - 1));
+  // Ensure LP MobilityFlag is present during flooding
+  data.setTag(std::make_shared<ndn::lp::OptoMobilityFlag>(ndn::lp::EmptyValue()));
 
   std::vector<Face*> outFaces;
   outFaces.reserve(8);

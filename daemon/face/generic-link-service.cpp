@@ -184,6 +184,10 @@ GenericLinkService::encodeLpFields(const ndn::PacketBase& netPkt, lp::Packet& lp
   if (const auto hop = netPkt.getTag<lp::OptoHopLimit>()) {
     lpPacket.add<lp::OptoHopLimitField>(*hop);
   }
+  // OptoFlood: encode LP MobilityFlag if present (presence-only)
+  if (const auto mob = netPkt.getTag<lp::OptoMobilityFlag>()) {
+    lpPacket.add<lp::OptoMobilityFlagField>(lp::EmptyValue());
+  }
 }
 
 void
@@ -464,6 +468,10 @@ GenericLinkService::decodeData(const Block& netPkt, const lp::Packet& firstPkt,
   // OptoFlood: decode experimental OptoHopLimit from LpPacket onto Data tag
   if (firstPkt.has<lp::OptoHopLimitField>()) {
     data->setTag(make_shared<lp::OptoHopLimit>(firstPkt.get<lp::OptoHopLimitField>()));
+  }
+  // OptoFlood: decode LP MobilityFlag onto Data tag
+  if (firstPkt.has<lp::OptoMobilityFlagField>()) {
+    data->setTag(make_shared<lp::OptoMobilityFlag>(lp::EmptyValue()));
   }
 
   this->receiveData(*data, endpointId);
