@@ -349,8 +349,8 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     return;
   }
 
-  // OptoFlood: Check for mobility via LP tag or legacy MetaInfo flag and handle accordingly
-  if (data.getTag<ndn::lp::OptoMobilityFlag>() != nullptr || ::ndn::optoflood::hasMobilityFlag(data.getMetaInfo())) {
+  // OptoFlood: Treat as mobility Data if LP.MobilityFlag is present, or FloodId exists (MetaInfo)
+  if (data.getTag<ndn::lp::OptoMobilityFlag>() != nullptr || ::ndn::optoflood::getFloodId(data.getMetaInfo())) {
     // Make a mutable copy for tag modification
     Data mutableData = data;
     handleOptoFloodData(mutableData, ingress);
