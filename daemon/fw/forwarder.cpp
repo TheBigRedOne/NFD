@@ -773,9 +773,9 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
 bool
 Forwarder::shouldFloodInterest(const Interest& interest)
 {
-  // Trigger Interest flooding only if the consumer has explicitly requested it
-  // by adding a specific marker to the ApplicationParameters.
-  return ::ndn::optoflood::isInterestFloodRequested(interest);
+  // Trigger Interest flooding when HopLimit is explicitly present (consumer intent)
+  // Final decision still gated by FIB/TFIB miss at call site
+  return static_cast<bool>(interest.getHopLimit());
 }
 
 void
@@ -783,10 +783,7 @@ Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& 
                                   const shared_ptr<pit::Entry>& pitEntry)
 {
   Interest floodInterest = interest;
-  if (auto reqHop = ::ndn::optoflood::getFloodHopLimit(interest)) {
-    floodInterest.setHopLimit(*reqHop);
-  }
-  else {
+  if (!floodInterest.getHopLimit()) {
     floodInterest.setHopLimit(OPTOFLOOD_HOP_LIMIT);
   }
 
