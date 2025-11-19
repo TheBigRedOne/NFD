@@ -687,23 +687,38 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
 {
   auto floodIdOpt = ::ndn::optoflood::getFloodId(data.getMetaInfo());
   if (!floodIdOpt) {
+    NFD_LOG_DEBUG("OptoFlood skip data=" << data.getName() << " reason=no FloodId");
     return; // Malformed, no FloodId
   }
-  
+
   // Deduplication
   if (m_floodIdCache.count(*floodIdOpt) > 0) {
+    NFD_LOG_DEBUG("OptoFlood dedup drop data=" << data.getName()
+                  << " floodId=" << *floodIdOpt
+                  << " ingress=" << ingress.face.getId());
     return; // Already processed this flood packet
   }
   m_floodIdCache.insert(*floodIdOpt);
 
   // Rate Limiting
   if (!checkFloodRate(data.getName().getPrefix(-1))) {
+    NFD_LOG_WARN("OptoFlood rate-limit drop data=" << data.getName()
+                 << " floodId=" << *floodIdOpt);
     return; // Rate limit exceeded for this producer
   }
 
   // Update TFIB
   if (auto newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo())) {
     m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
+    NFD_LOG_DEBUG("OptoFlood TFIB update prefix=" << data.getName().getPrefix(-1)
+                  << " face=" << ingress.face.getId()
+                  << " newFaceSeq=" << *newFaceSeqOpt
+                  << " floodId=" << *floodIdOpt);
+  }
+  else {
+    NFD_LOG_DEBUG("OptoFlood data=" << data.getName()
+                  << " floodId=" << *floodIdOpt
+                  << " missing NewFaceSeq");
   }
 
   // Controlled Flooding (multi-hop via LP OptoHopLimit, local scope per-hop)
@@ -715,7 +730,15 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
     hopLimit = OPTOFLOOD_HOP_LIMIT; // default for Data flooding
   }
 
+  NFD_LOG_DEBUG("OptoFlood process data=" << data.getName()
+                << " floodId=" << *floodIdOpt
+                << " ingress=" << ingress.face.getId()
+                << " hopLimit=" << hopLimit);
+
   if (hopLimit == 0) {
+    NFD_LOG_DEBUG("OptoFlood stop data=" << data.getName()
+                  << " floodId=" << *floodIdOpt
+                  << " reason=hopLimit-zero");
     return;
   }
 
@@ -765,7 +788,16 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
     if (!sentIds.insert(f->getId()).second) {
       continue;
     }
+    NFD_LOG_DEBUG("OptoFlood forward data=" << data.getName()
+                  << " floodId=" << *floodIdOpt
+                  << " outFace=" << f->getId()
+                  << " remainingHopLimit=" << (hopLimit - 1));
     f->sendData(data);
+  }
+
+  if (outFaces.empty()) {
+    NFD_LOG_DEBUG("OptoFlood no eligible outFace data=" << data.getName()
+                  << " floodId=" << *floodIdOpt);
   }
 }
 
@@ -797,8 +829,15 @@ Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& 
 bool
 Forwarder::checkFloodRate(const ndn::Name& producerPrefix)
 {
-  m_floodRateMap[producerPrefix]++;
-  return m_floodRateMap.at(producerPrefix) <= OPTOFLOOD_RATE_LIMIT;
+  size_t& counter = m_floodRateMap[producerPrefix];
+  ++counter;
+  if (counter > OPTOFLOOD_RATE_LIMIT) {
+    NFD_LOG_DEBUG("OptoFlood rate counter exceeded prefix=" << producerPrefix
+                  << " count=" << counter
+                  << " limit=" << OPTOFLOOD_RATE_LIMIT);
+    return false;
+  }
+  return true;
 }
 
 void

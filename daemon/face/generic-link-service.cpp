@@ -183,10 +183,12 @@ GenericLinkService::encodeLpFields(const ndn::PacketBase& netPkt, lp::Packet& lp
   // OptoFlood: encode experimental data-hop-limit onto LpPacket if present
   if (const auto hop = netPkt.getTag<lp::OptoHopLimit>()) {
     lpPacket.add<lp::OptoHopLimitField>(*hop);
+    NFD_LOG_FACE_TRACE("encode OptoHopLimit=" << *hop);
   }
   // OptoFlood: encode LP MobilityFlag if present (presence-only)
   if (const auto mob = netPkt.getTag<lp::OptoMobilityFlag>()) {
     lpPacket.add<lp::OptoMobilityFlagField>(lp::EmptyValue());
+    NFD_LOG_FACE_TRACE("encode OptoMobilityFlag");
   }
 }
 
@@ -467,11 +469,14 @@ GenericLinkService::decodeData(const Block& netPkt, const lp::Packet& firstPkt,
 
   // OptoFlood: decode experimental OptoHopLimit from LpPacket onto Data tag
   if (firstPkt.has<lp::OptoHopLimitField>()) {
-    data->setTag(make_shared<lp::OptoHopLimit>(firstPkt.get<lp::OptoHopLimitField>()));
+    const auto hopField = firstPkt.get<lp::OptoHopLimitField>();
+    data->setTag(make_shared<lp::OptoHopLimit>(hopField));
+    NFD_LOG_FACE_TRACE("decode OptoHopLimit=" << hopField);
   }
   // OptoFlood: decode LP MobilityFlag onto Data tag
   if (firstPkt.has<lp::OptoMobilityFlagField>()) {
     data->setTag(make_shared<lp::OptoMobilityFlag>(lp::EmptyValue()));
+    NFD_LOG_FACE_TRACE("decode OptoMobilityFlag");
   }
 
   this->receiveData(*data, endpointId);
