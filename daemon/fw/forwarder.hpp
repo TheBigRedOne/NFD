@@ -40,6 +40,8 @@
 #include "table/network-region-table.hpp"
 #include "table/tfib.hpp"
 
+#include <unordered_set>
+
 #include <ndn-cxx/lp/tags.hpp>
 #include <ndn-cxx/name.hpp>
 #include <ndn-cxx/util/scheduler.hpp>
@@ -256,7 +258,8 @@ private:
 
   // OptoFlood extension methods
   void
-  handleOptoFloodData(Data data, const FaceEndpoint& ingress);
+  handleOptoFloodData(Data data, const FaceEndpoint& ingress,
+                      const std::unordered_set<uint64_t>& suppressedFaces);
   void
   handleInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
                          const shared_ptr<pit::Entry>& pitEntry);

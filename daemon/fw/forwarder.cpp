@@ -349,17 +349,26 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     return;
   }
 
+  // PIT match
+  pit::DataMatchResult pitMatches = m_pit.findAllDataMatches(data);
+
   // OptoFlood: Treat as mobility Data if LP.MobilityFlag is present, or FloodId exists (MetaInfo)
-  if (data.getTag<ndn::lp::OptoMobilityFlag>() != nullptr || ::ndn::optoflood::getFloodId(data.getMetaInfo())) {
-    // Make a mutable copy for tag modification
+  bool isOptoFloodData = (data.getTag<ndn::lp::OptoMobilityFlag>() != nullptr) ||
+                         (::ndn::optoflood::getFloodId(data.getMetaInfo()).has_value());
+  if (isOptoFloodData) {
+    std::unordered_set<uint64_t> suppressedFaces;
+    suppressedFaces.insert(ingress.face.getId());
+    for (const auto& pitEntry : pitMatches) {
+      for (const pit::InRecord& inRecord : pitEntry->getInRecords()) {
+        suppressedFaces.insert(inRecord.getFace().getId());
+      }
+    }
     Data mutableData = data;
-    handleOptoFloodData(mutableData, ingress);
+    handleOptoFloodData(std::move(mutableData), ingress, suppressedFaces);
     // After flooding, we still let the Data packet proceed through the normal path
     // to satisfy any matching PIT entries.
   }
   
-  // PIT match
-  pit::DataMatchResult pitMatches = m_pit.findAllDataMatches(data);
   if (pitMatches.size() == 0) {
     // go to Data unsolicited pipeline
     this->onDataUnsolicited(data, ingress);
@@ -430,6 +439,10 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       pitEntry->clearInRecords();
       pitEntry->deleteOutRecord(ingress.face);
     }
+
+    // OptoFlood: clear LP mobility semantics before satisfying downstreams (stop flooding)
+    const_cast<Data&>(data).removeTag<ndn::lp::OptoMobilityFlag>();
+    const_cast<Data&>(data).removeTag<ndn::lp::OptoHopLimit>();
 
     for (Face* pendingDownstream : pendingDownstreams) {
       if (pendingDownstream->getId() == ingress.face.getId() &&
@@ -683,7 +696,8 @@ Forwarder::processConfig(const ConfigSection& configSection, bool isDryRun, cons
 // --- OptoFlood Implementation ---
 
 void
-Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
+Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
+                               const std::unordered_set<uint64_t>& suppressedFaces)
 {
   auto floodIdOpt = ::ndn::optoflood::getFloodId(data.getMetaInfo());
   if (!floodIdOpt) {
@@ -761,6 +775,9 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
       if (out.getId() == ingress.face.getId()) {
         continue;
       }
+      if (suppressedFaces.find(out.getId()) != suppressedFaces.end()) {
+        continue;
+      }
       if (out.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
         continue;
       }
@@ -772,6 +789,9 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress)
     // Fallback to adjacent faces (exclude LOCAL and ingress)
     for (auto& f : m_faceTable) {
       if (f.getId() == ingress.face.getId()) {
+        continue;
+      }
+      if (suppressedFaces.find(f.getId()) != suppressedFaces.end()) {
         continue;
       }
       if (f.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
