@@ -247,6 +247,10 @@ private:
 
   void
   scheduleFloodRateReset();
+  void
+  scheduleInterestFloodCleanup();
+  bool
+  markInterestFlooded(const Interest& interest);
 
   void
   onContentStoreHit(const Interest& interest, const FaceEndpoint& ingress,
@@ -307,11 +311,31 @@ private:
   RateLimitMap m_floodRateMap;
   ndn::scheduler::ScopedEventId m_floodRateResetEvent;
 
+  struct InterestFloodKey {
+    InterestFloodKey(const ndn::Name& name, uint32_t nonce);
+    bool operator==(const InterestFloodKey& other) const;
+
+    ndn::Name name;
+    uint32_t nonce;
+  };
+
+  struct InterestFloodKeyHash {
+    size_t operator()(const InterestFloodKey& key) const noexcept;
+  };
+
+  using InterestFloodCache = std::unordered_map<InterestFloodKey,
+                                                time::steady_clock::TimePoint,
+                                                InterestFloodKeyHash>;
+  InterestFloodCache m_interestFloodCache;
+  ndn::scheduler::ScopedEventId m_interestFloodCleanupEvent;
+
   // OptoFlood constants
   static constexpr time::milliseconds TFIB_CLEANUP_INTERVAL = 100_ms;
   static constexpr time::seconds FLOOD_RATE_RESET_INTERVAL = 1_s;
   static constexpr uint8_t OPTOFLOOD_HOP_LIMIT = 3;
   static constexpr size_t OPTOFLOOD_RATE_LIMIT = 100; // packets per second
+  static constexpr time::milliseconds INTEREST_FLOOD_CACHE_TTL = 1000_ms;
+  static constexpr time::milliseconds INTEREST_FLOOD_CLEANUP_INTERVAL = 100_ms;
 
   // allow Strategy (base class) to enter pipelines
   friend ::nfd::fw::Strategy;

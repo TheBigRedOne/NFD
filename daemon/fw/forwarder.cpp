@@ -51,6 +51,26 @@ getDefaultStrategyName()
   return fw::BestRouteStrategy::getStrategyName();
 }
 
+Forwarder::InterestFloodKey::InterestFloodKey(const Name& n, uint32_t nonceId)
+  : name(n)
+  , nonce(nonceId)
+{
+}
+
+bool
+Forwarder::InterestFloodKey::operator==(const InterestFloodKey& other) const
+{
+  return nonce == other.nonce && name == other.name;
+}
+
+size_t
+Forwarder::InterestFloodKeyHash::operator()(const InterestFloodKey& key) const noexcept
+{
+  size_t seed = std::hash<Name>()(key.name);
+  seed ^= std::hash<uint32_t>()(key.nonce) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+  return seed;
+}
+
 Forwarder::Forwarder(FaceTable& faceTable)
   : m_faceTable(faceTable)
   , m_unsolicitedDataPolicy(make_unique<fw::DefaultUnsolicitedDataPolicy>())
@@ -61,6 +81,7 @@ Forwarder::Forwarder(FaceTable& faceTable)
 {
   scheduleTfibCleanup();
   scheduleFloodRateReset();
+  scheduleInterestFloodCleanup();
 
   m_faceTable.afterAdd.connect([this] (const Face& face) {
     face.afterReceiveInterest.connect(
@@ -107,6 +128,35 @@ Forwarder::scheduleFloodRateReset()
     m_floodRateMap.clear();
     scheduleFloodRateReset();
   });
+}
+
+void
+Forwarder::scheduleInterestFloodCleanup()
+{
+  m_interestFloodCleanupEvent = getScheduler().schedule(INTEREST_FLOOD_CLEANUP_INTERVAL, [this] {
+    auto now = time::steady_clock::now();
+    for (auto it = m_interestFloodCache.begin(); it != m_interestFloodCache.end();) {
+      if (it->second <= now) {
+        it = m_interestFloodCache.erase(it);
+      }
+      else {
+        ++it;
+      }
+    }
+    scheduleInterestFloodCleanup();
+  });
+}
+
+bool
+Forwarder::markInterestFlooded(const Interest& interest)
+{
+  InterestFloodKey key(interest.getName(), interest.getNonce());
+  auto expiry = time::steady_clock::now() + INTEREST_FLOOD_CACHE_TTL;
+  auto result = m_interestFloodCache.emplace(std::move(key), expiry);
+  if (!result.second) {
+    return false;
+  }
+  return true;
 }
 
 void
@@ -248,6 +298,7 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
     .afterReceiveInterest(interest, FaceEndpoint(ingress.face), pitEntry);
 
   const fib::Entry& fibEntry = m_fib.findLongestPrefixMatch(*pitEntry);
+  const bool consumerIntent = shouldFloodInterest(interest);
 
   if (!fibEntry.hasNextHops()) {
     // FIB miss or no nexthops, check TFIB
@@ -255,12 +306,30 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
       onOutgoingInterest(interest, tfibEntry->getFace(), pitEntry);
       return; // Forwarded using TFIB
     }
-    
-    // If both FIB and TFIB miss, consider flooding
-    if (shouldFloodInterest(interest)) {
+
+    // If both FIB and TFIB miss, automatically flood once
+    if (markInterestFlooded(interest)) {
+      NFD_LOG_DEBUG("OptoFlood auto-flood interest=" << interest.getName()
+                    << " nonce=" << interest.getNonce());
       handleInterestFlooding(interest, ingress, pitEntry);
-      return; // Flooding handled
     }
+    else {
+      NFD_LOG_DEBUG("OptoFlood skip auto-flood interest=" << interest.getName()
+                    << " nonce=" << interest.getNonce() << " reason=already-flooded");
+    }
+    return;
+  }
+
+  // Consumer intent: allow explicit flood even when FIB exists
+  if (consumerIntent && markInterestFlooded(interest)) {
+    NFD_LOG_DEBUG("OptoFlood consumer-request flood interest=" << interest.getName()
+                  << " nonce=" << interest.getNonce());
+    handleInterestFlooding(interest, ingress, pitEntry);
+    return;
+  }
+  else if (consumerIntent) {
+    NFD_LOG_DEBUG("OptoFlood consumer-request flood skipped interest=" << interest.getName()
+                  << " nonce=" << interest.getNonce() << " reason=already-flooded");
   }
 }
 
@@ -839,10 +908,26 @@ Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& 
     floodInterest.setHopLimit(OPTOFLOOD_HOP_LIMIT);
   }
 
+  std::unordered_set<uint64_t> sentFaces;
   for (auto& face : m_faceTable) {
-    if (face.getId() != ingress.face.getId() && face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
-      onOutgoingInterest(floodInterest, face, pitEntry);
+    if (face.getId() == ingress.face.getId()) {
+      continue;
     }
+    if (face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+      continue;
+    }
+    if (!sentFaces.insert(face.getId()).second) {
+      continue;
+    }
+    NFD_LOG_DEBUG("OptoFlood forward interest=" << floodInterest.getName()
+                  << " nonce=" << floodInterest.getNonce()
+                  << " outFace=" << face.getId()
+                  << " hopLimit=" << static_cast<unsigned>(*floodInterest.getHopLimit()));
+    onOutgoingInterest(floodInterest, face, pitEntry);
+  }
+
+  if (sentFaces.empty()) {
+    NFD_LOG_DEBUG("OptoFlood interest had no eligible outFace name=" << floodInterest.getName());
   }
 }
 
