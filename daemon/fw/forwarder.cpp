@@ -38,6 +38,8 @@
 
 #include <ndn-cxx/lp/pit-token.hpp>
 #include <ndn-cxx/lp/tags.hpp>
+#include <boost/endian/conversion.hpp>
+#include <cstring>
 
 namespace nfd {
 
@@ -67,8 +69,10 @@ size_t
 Forwarder::InterestFloodKeyHash::operator()(const InterestFloodKey& key) const noexcept
 {
   size_t seed = std::hash<Name>()(key.name);
-  seed ^= std::hash<uint32_t>()(static_cast<uint32_t>(key.nonce.value())) + 0x9e3779b9 +
-          (seed << 6) + (seed >> 2);
+  uint32_t nonceValue = 0;
+  std::memcpy(&nonceValue, key.nonce.data(), sizeof(nonceValue));
+  boost::endian::big_to_native_inplace(nonceValue);
+  seed ^= std::hash<uint32_t>()(nonceValue) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
   return seed;
 }
 
