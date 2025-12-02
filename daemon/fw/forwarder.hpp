@@ -45,6 +45,7 @@
 #include <ndn-cxx/lp/tags.hpp>
 #include <ndn-cxx/name.hpp>
 #include <ndn-cxx/util/scheduler.hpp>
+#include <ndn-cxx/util/time.hpp>
 
 // #include "table/cs-entry.hpp" // Removed to break circular dependency
 
@@ -324,7 +325,7 @@ private:
   };
 
   using InterestFloodCache = std::unordered_map<InterestFloodKey,
-                                                time::steady_clock::TimePoint,
+                                                ndn::time::steady_clock::time_point,
                                                 InterestFloodKeyHash>;
   InterestFloodCache m_interestFloodCache;
   ndn::scheduler::ScopedEventId m_interestFloodCleanupEvent;
