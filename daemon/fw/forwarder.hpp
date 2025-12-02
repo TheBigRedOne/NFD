@@ -313,11 +313,11 @@ private:
   ndn::scheduler::ScopedEventId m_floodRateResetEvent;
 
   struct InterestFloodKey {
-    InterestFloodKey(const ndn::Name& name, uint32_t nonce);
+    InterestFloodKey(const ndn::Name& name, ndn::Interest::Nonce nonce);
     bool operator==(const InterestFloodKey& other) const;
 
     ndn::Name name;
-    uint32_t nonce;
+    ndn::Interest::Nonce nonce;
   };
 
   struct InterestFloodKeyHash {
