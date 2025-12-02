@@ -67,7 +67,8 @@ size_t
 Forwarder::InterestFloodKeyHash::operator()(const InterestFloodKey& key) const noexcept
 {
   size_t seed = std::hash<Name>()(key.name);
-  seed ^= std::hash<uint32_t>()(static_cast<uint32_t>(key.nonce)) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+  seed ^= std::hash<uint32_t>()(static_cast<uint32_t>(key.nonce.value())) + 0x9e3779b9 +
+          (seed << 6) + (seed >> 2);
   return seed;
 }
 
