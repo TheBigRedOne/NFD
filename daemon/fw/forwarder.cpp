@@ -38,6 +38,7 @@
 
 #include <ndn-cxx/lp/pit-token.hpp>
 #include <ndn-cxx/lp/tags.hpp>
+#include <ndn-cxx/mgmt/control-parameters.hpp>
 #include <boost/endian/conversion.hpp>
 #include <cstring>
 
@@ -796,12 +797,14 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
   }
 
   // Update TFIB
-  if (auto newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo())) {
+  std::optional<uint32_t> newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo());
+  if (newFaceSeqOpt) {
     m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
     NFD_LOG_DEBUG("OptoFlood TFIB update prefix=" << data.getName().getPrefix(-1)
                   << " face=" << ingress.face.getId()
                   << " newFaceSeq=" << *newFaceSeqOpt
                   << " floodId=" << *floodIdOpt);
+    triggerFastLsaIfNeeded(data.getName().getPrefix(-1), ingress.face, newFaceSeqOpt);
   }
   else {
     NFD_LOG_DEBUG("OptoFlood data=" << data.getName()
@@ -948,6 +951,35 @@ Forwarder::checkFloodRate(const ndn::Name& producerPrefix)
     return false;
   }
   return true;
+}
+
+void
+Forwarder::triggerFastLsaIfNeeded(const ndn::Name& producerPrefix, const Face& face,
+                                  std::optional<uint32_t> newFaceSeq)
+{
+  if (!m_internalController) {
+    return;
+  }
+
+  auto now = time::steady_clock::now();
+  auto it = m_fastLsaThrottle.find(producerPrefix);
+  if (it != m_fastLsaThrottle.end() && (now - it->second) < FAST_LSA_THROTTLE) {
+    return;
+  }
+  m_fastLsaThrottle[producerPrefix] = now;
+
+  ndn::nfd::ControlParameters params;
+  params.setName(producerPrefix)
+        .setFaceId(face.getId())
+        .setExpirationPeriod(FAST_LSA_LIFETIME);
+  if (newFaceSeq) {
+    params.setCost(*newFaceSeq);
+  }
+
+  m_internalController->startCommand("/localhost/nlsr/fast-lsa/trigger",
+                                     params,
+                                     [] (const ndn::nfd::ControlResponse&) {},
+                                     [] (const ndn::nfd::ControlResponse&, const std::string&) {});
 }
 
 void
