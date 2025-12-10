@@ -39,6 +39,8 @@
 #include <ndn-cxx/lp/pit-token.hpp>
 #include <ndn-cxx/lp/tags.hpp>
 #include <ndn-cxx/mgmt/control-parameters.hpp>
+#include <ndn-cxx/mgmt/nfd/command-options.hpp>
+#include <ndn-cxx/mgmt/nfd/control-command.hpp>
 #include <boost/endian/conversion.hpp>
 #include <cstring>
 
@@ -47,6 +49,27 @@ namespace nfd {
 NFD_LOG_INIT(Forwarder);
 
 const std::string CFG_FORWARDER = "forwarder";
+
+namespace {
+
+class FastLsaTriggerCommand : public ndn::nfd::ControlCommand
+{
+public:
+  FastLsaTriggerCommand()
+    : ControlCommand("nlsr", "fast-lsa/trigger")
+  {
+    m_requestValidator
+      .required(ndn::nfd::ControlParameterField::NAME)
+      .optional(ndn::nfd::ControlParameterField::FACE_ID)
+      .optional(ndn::nfd::ControlParameterField::EXPIRATION_PERIOD)
+      .optional(ndn::nfd::ControlParameterField::COST);
+    m_responseValidator = m_requestValidator;
+  }
+};
+
+const std::shared_ptr<FastLsaTriggerCommand> FAST_LSA_CMD = std::make_shared<FastLsaTriggerCommand>();
+
+} // namespace
 
 static Name
 getDefaultStrategyName()
@@ -976,10 +999,11 @@ Forwarder::triggerFastLsaIfNeeded(const ndn::Name& producerPrefix, const Face& f
     params.setCost(*newFaceSeq);
   }
 
-  m_internalController->startCommand("/localhost/nlsr/fast-lsa/trigger",
-                                     params,
+  ndn::nfd::CommandOptions opts;
+  m_internalController->startCommand(FAST_LSA_CMD, params,
                                      [] (const ndn::nfd::ControlResponse&) {},
-                                     [] (const ndn::nfd::ControlResponse&, const std::string&) {});
+                                     [] (const ndn::nfd::ControlResponse&, const std::string&) {},
+                                     opts);
 }
 
 void
