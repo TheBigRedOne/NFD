@@ -59,10 +59,10 @@ public:
     : ControlCommand("nlsr", "fast-lsa/trigger")
   {
     m_requestValidator
-      .required(ndn::nfd::ControlParameterField::NAME)
-      .optional(ndn::nfd::ControlParameterField::FACE_ID)
-      .optional(ndn::nfd::ControlParameterField::EXPIRATION_PERIOD)
-      .optional(ndn::nfd::ControlParameterField::COST);
+      .required(ndn::nfd::CONTROL_PARAMETER_NAME)
+      .optional(ndn::nfd::CONTROL_PARAMETER_FACE_ID)
+      .optional(ndn::nfd::CONTROL_PARAMETER_EXPIRATION_PERIOD)
+      .optional(ndn::nfd::CONTROL_PARAMETER_COST);
     m_responseValidator = m_requestValidator;
   }
 };
@@ -1000,10 +1000,12 @@ Forwarder::triggerFastLsaIfNeeded(const ndn::Name& producerPrefix, const Face& f
   }
 
   ndn::nfd::CommandOptions opts;
-  m_internalController->startCommand(FAST_LSA_CMD, params,
-                                     [] (const ndn::nfd::ControlResponse&) {},
-                                     [] (const ndn::nfd::ControlResponse&, const std::string&) {},
-                                     opts);
+  m_internalController->startCommand(
+    FAST_LSA_CMD,
+    params,
+    [] (const ndn::nfd::ControlParameters&) {},
+    [] (const ndn::nfd::ControlResponse&, const std::string&) {},
+    opts);
 }
 
 void
