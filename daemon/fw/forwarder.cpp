@@ -41,6 +41,7 @@
 #include <ndn-cxx/mgmt/control-parameters.hpp>
 #include <ndn-cxx/mgmt/nfd/command-options.hpp>
 #include <ndn-cxx/mgmt/nfd/control-command.hpp>
+#include <ndn-cxx/mgmt/control-response.hpp>
 #include <boost/endian/conversion.hpp>
 #include <cstring>
 
@@ -56,7 +57,7 @@ class FastLsaTriggerCommand : public ndn::nfd::ControlCommand
 {
 public:
   FastLsaTriggerCommand()
-    : ControlCommand("nlsr", "fast-lsa/trigger")
+    : ControlCommand("fast-lsa", "trigger")
   {
     m_requestValidator
       .required(ndn::nfd::CONTROL_PARAMETER_NAME)
@@ -1000,11 +1001,12 @@ Forwarder::triggerFastLsaIfNeeded(const ndn::Name& producerPrefix, const Face& f
   }
 
   ndn::nfd::CommandOptions opts;
+  opts.setPrefix(ndn::Name("/localhost/nlsr"));
   m_internalController->startCommand(
     FAST_LSA_CMD,
     params,
     [] (const ndn::nfd::ControlParameters&) {},
-    [] (const ndn::nfd::ControlResponse&, const std::string&) {},
+    [] (const ndn::nfd::ControlResponse&) {},
     opts);
 }
 
