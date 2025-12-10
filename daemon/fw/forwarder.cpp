@@ -68,8 +68,6 @@ public:
   }
 };
 
-const std::shared_ptr<FastLsaTriggerCommand> FAST_LSA_CMD = std::make_shared<FastLsaTriggerCommand>();
-
 } // namespace
 
 static Name
@@ -1002,8 +1000,7 @@ Forwarder::triggerFastLsaIfNeeded(const ndn::Name& producerPrefix, const Face& f
 
   ndn::nfd::CommandOptions opts;
   opts.setPrefix(ndn::Name("/localhost/nlsr"));
-  m_internalController->startCommand(
-    FAST_LSA_CMD,
+  m_internalController->start<FastLsaTriggerCommand>(
     params,
     [] (const ndn::nfd::ControlParameters&) {},
     [] (const ndn::nfd::ControlResponse&) {},
