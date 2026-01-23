@@ -276,7 +276,8 @@ private:
                       const std::unordered_set<uint64_t>& suppressedFaces);
   void
   handleInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
-                         const shared_ptr<pit::Entry>& pitEntry);
+                         const shared_ptr<pit::Entry>& pitEntry,
+                         std::optional<uint64_t> excludeFaceId = std::nullopt);
   bool
   shouldFloodInterest(const Interest& interest);
   bool

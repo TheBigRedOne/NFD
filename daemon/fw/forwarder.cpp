@@ -328,13 +328,23 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   const fib::Entry& fibEntry = m_fib.findLongestPrefixMatch(*pitEntry);
   const bool consumerIntent = shouldFloodInterest(interest);
 
-  if (!fibEntry.hasNextHops()) {
-    // FIB miss or no nexthops, check TFIB
-    if (auto* tfibEntry = m_tfib.findLongestPrefixMatch(interest.getName())) {
-      onOutgoingInterest(interest, tfibEntry->getFace(), pitEntry);
-      return; // Forwarded using TFIB
+  // TFIB takes precedence
+  if (auto* tfibEntry = m_tfib.findLongestPrefixMatch(interest.getName())) {
+    const uint64_t tfibFaceId = tfibEntry->getFace().getId();
+    onOutgoingInterest(interest, tfibEntry->getFace(), pitEntry);
+    if (markInterestFlooded(interest)) {
+      NFD_LOG_DEBUG("OptoFlood tfib-forward and flood interest=" << interest.getName()
+                    << " nonce=" << interest.getNonce());
+      handleInterestFlooding(interest, ingress, pitEntry, tfibFaceId);
     }
+    else {
+      NFD_LOG_DEBUG("OptoFlood tfib-forward flood skipped interest=" << interest.getName()
+                    << " nonce=" << interest.getNonce() << " reason=already-flooded");
+    }
+    return;
+  }
 
+  if (!fibEntry.hasNextHops()) {
     // If both FIB and TFIB miss, automatically flood once
     if (markInterestFlooded(interest)) {
       NFD_LOG_DEBUG("OptoFlood auto-flood interest=" << interest.getName()
@@ -931,7 +941,8 @@ Forwarder::shouldFloodInterest(const Interest& interest)
 
 void
 Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
-                                  const shared_ptr<pit::Entry>& pitEntry)
+                                  const shared_ptr<pit::Entry>& pitEntry,
+                                  std::optional<uint64_t> excludeFaceId)
 {
   Interest floodInterest = interest;
   if (!floodInterest.getHopLimit()) {
@@ -941,6 +952,9 @@ Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& 
   std::unordered_set<uint64_t> sentFaces;
   for (auto& face : m_faceTable) {
     if (face.getId() == ingress.face.getId()) {
+      continue;
+    }
+    if (excludeFaceId && face.getId() == *excludeFaceId) {
       continue;
     }
     if (face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
