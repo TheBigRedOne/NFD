@@ -35,6 +35,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <optional>
 
 namespace nfd::fw {
 
@@ -379,6 +380,20 @@ protected: // actions
   void
   sendNacks(const lp::NackHeader& header, const shared_ptr<pit::Entry>& pitEntry,
             std::initializer_list<const Face*> exceptFaces = {});
+
+  /**
+   * \brief Trigger OptoFlood interest flooding from a strategy decision.
+   *
+   * \param interest the Interest to be flooded
+   * \param ingress the ingress face endpoint of the Interest
+   * \param pitEntry the PIT entry associated with the Interest
+   * \param excludeFaceId an optional face id to exclude from flooding
+   * \return whether flooding was initiated for this Interest
+   */
+  bool
+  triggerInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
+                          const shared_ptr<pit::Entry>& pitEntry,
+                          std::optional<uint64_t> excludeFaceId = std::nullopt);
 
   /**
    * \brief Schedule the PIT entry to be erased after \p duration.

@@ -309,6 +309,23 @@ Strategy::sendNacks(const lp::NackHeader& header, const shared_ptr<pit::Entry>& 
   // warning: don't loop on pitEntry->getInRecords(), because in-record is deleted when sending Nack
 }
 
+bool
+Strategy::triggerInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
+                                  const shared_ptr<pit::Entry>& pitEntry,
+                                  std::optional<uint64_t> excludeFaceId)
+{
+  if (!m_forwarder.markInterestFlooded(interest)) {
+    NFD_LOG_DEBUG("OptoFlood strategy flood skipped interest=" << interest.getName()
+                  << " nonce=" << interest.getNonce() << " reason=already-flooded");
+    return false;
+  }
+
+  NFD_LOG_DEBUG("OptoFlood strategy flood interest=" << interest.getName()
+                << " nonce=" << interest.getNonce());
+  m_forwarder.handleInterestFlooding(interest, ingress, pitEntry, excludeFaceId);
+  return true;
+}
+
 const fib::Entry&
 Strategy::lookupFib(const pit::Entry& pitEntry) const
 {

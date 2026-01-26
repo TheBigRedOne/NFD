@@ -81,8 +81,10 @@ BestRouteStrategy::afterReceiveInterest(const Interest& interest, const FaceEndp
       NFD_LOG_INTEREST_FROM(interest, ingress, "new no-nexthop");
       lp::NackHeader nackHeader;
       nackHeader.setReason(lp::NackReason::NO_ROUTE);
-      this->sendNack(nackHeader, ingress.face, pitEntry);
-      this->rejectPendingInterest(pitEntry);
+      lp::Nack nackPkt(interest);
+      nackPkt.setHeader(nackHeader);
+      this->sendNack(nackPkt, ingress.face);
+      this->triggerInterestFlooding(interest, ingress, pitEntry);
       return;
     }
 
@@ -109,6 +111,12 @@ BestRouteStrategy::afterReceiveInterest(const Interest& interest, const FaceEndp
   it = findEligibleNextHopWithEarliestOutRecord(ingress.face, interest, nexthops, pitEntry);
   if (it == nexthops.end()) {
     NFD_LOG_INTEREST_FROM(interest, ingress, "retx no-nexthop");
+    lp::NackHeader nackHeader;
+    nackHeader.setReason(lp::NackReason::NO_ROUTE);
+    lp::Nack nackPkt(interest);
+    nackPkt.setHeader(nackHeader);
+    this->sendNack(nackPkt, ingress.face);
+    this->triggerInterestFlooding(interest, ingress, pitEntry);
   }
   else {
     Face& outFace = it->getFace();

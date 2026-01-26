@@ -844,21 +844,38 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
                   << " missing NewFaceSeq");
   }
 
-  // Controlled Flooding (multi-hop via LP OptoHopLimit, local scope per-hop)
+  const Name floodPrefix = data.getName().getPrefix(-1);
+  const auto& fibEntry = m_fib.findLongestPrefixMatch(floodPrefix);
+  const bool hasFibNextHops = fibEntry.hasNextHops();
+
   uint64_t hopLimit = 0;
-  if (auto tag = data.getTag<ndn::lp::OptoHopLimit>()) {
+  const bool useHopLimit = !hasFibNextHops;
+  if (useHopLimit) {
+    if (auto tag = data.getTag<ndn::lp::OptoHopLimit>()) {
+      hopLimit = *tag;
+    }
+    else {
+      hopLimit = 1;
+    }
+  }
+  else if (auto tag = data.getTag<ndn::lp::OptoHopLimit>()) {
     hopLimit = *tag;
   }
+
+  if (useHopLimit) {
+    NFD_LOG_DEBUG("OptoFlood process data=" << data.getName()
+                  << " floodId=" << *floodIdOpt
+                  << " ingress=" << ingress.face.getId()
+                  << " hopLimit=" << hopLimit);
+  }
   else {
-    hopLimit = OPTOFLOOD_HOP_LIMIT; // default for Data flooding
+    NFD_LOG_DEBUG("OptoFlood process data=" << data.getName()
+                  << " floodId=" << *floodIdOpt
+                  << " ingress=" << ingress.face.getId()
+                  << " hopLimit=disabled");
   }
 
-  NFD_LOG_DEBUG("OptoFlood process data=" << data.getName()
-                << " floodId=" << *floodIdOpt
-                << " ingress=" << ingress.face.getId()
-                << " hopLimit=" << hopLimit);
-
-  if (hopLimit == 0) {
+  if (useHopLimit && hopLimit == 0) {
     NFD_LOG_DEBUG("OptoFlood stop data=" << data.getName()
                   << " floodId=" << *floodIdOpt
                   << " reason=hopLimit-zero");
@@ -868,16 +885,16 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
   // decrement and forward according to policy:
   // (1) Prefer FIB next-hops (non-LOCAL), excluding ingress
   // (2) If no FIB next-hops, fallback to adjacent faces (non-LOCAL), excluding ingress
-  data.setTag(std::make_shared<ndn::lp::OptoHopLimit>(hopLimit - 1));
+  if (useHopLimit) {
+    data.setTag(std::make_shared<ndn::lp::OptoHopLimit>(hopLimit - 1));
+  }
   // Ensure LP MobilityFlag is present during flooding
   data.setTag(std::make_shared<ndn::lp::OptoMobilityFlag>(ndn::lp::EmptyValue()));
 
   std::vector<Face*> outFaces;
   outFaces.reserve(8);
 
-  const Name floodPrefix = data.getName().getPrefix(-1);
-  const auto& fibEntry = m_fib.findLongestPrefixMatch(floodPrefix);
-  if (fibEntry.hasNextHops()) {
+  if (hasFibNextHops) {
     // Use FIB next hops first
     for (const auto& nh : fibEntry.getNextHops()) {
       Face& out = nh.getFace();
@@ -917,10 +934,18 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
     if (!sentIds.insert(f->getId()).second) {
       continue;
     }
-    NFD_LOG_DEBUG("OptoFlood forward data=" << data.getName()
-                  << " floodId=" << *floodIdOpt
-                  << " outFace=" << f->getId()
-                  << " remainingHopLimit=" << (hopLimit - 1));
+    if (useHopLimit) {
+      NFD_LOG_DEBUG("OptoFlood forward data=" << data.getName()
+                    << " floodId=" << *floodIdOpt
+                    << " outFace=" << f->getId()
+                    << " remainingHopLimit=" << (hopLimit - 1));
+    }
+    else {
+      NFD_LOG_DEBUG("OptoFlood forward data=" << data.getName()
+                    << " floodId=" << *floodIdOpt
+                    << " outFace=" << f->getId()
+                    << " remainingHopLimit=disabled");
+    }
     f->sendData(data);
   }
 
