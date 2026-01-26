@@ -8,6 +8,7 @@
 #include <ndn-cxx/name.hpp>
 #include <ndn-cxx/util/time.hpp>
 
+#include <optional>
 #include <boost/multi_index_container.hpp>
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/member.hpp>
@@ -54,6 +55,18 @@ public:
   time::steady_clock::time_point m_expiry;
   uint32_t m_newFaceSeq;
   uint64_t m_floodId;
+  time::steady_clock::time_point m_lastUsed;
+  std::optional<time::steady_clock::time_point> m_fibAvailableSince;
+};
+
+/**
+ * @brief Decision for TFIB usage on an Interest.
+ */
+enum class TfibUseDecision
+{
+  NotFound,
+  Use,
+  Retired
 };
 
 /**
@@ -78,6 +91,13 @@ public:
    */
   void
   insert(const Name& prefix, face::Face& face, uint32_t seq, uint64_t floodId);
+
+  /**
+   * @brief Updates expiry and stability state when a TFIB entry is used.
+   */
+  TfibUseDecision
+  onUse(const Name& prefix, bool fibAvailable, time::milliseconds idleTtl,
+        time::milliseconds fibStableWindow);
   
   /**
    * @brief Erases all entries whose nexthop is the specified face.

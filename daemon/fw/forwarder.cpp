@@ -68,6 +68,9 @@ public:
   }
 };
 
+constexpr time::milliseconds TFIB_IDLE_TTL = 5000_ms;
+constexpr time::milliseconds TFIB_FIB_STABLE_WINDOW = 5000_ms;
+
 } // namespace
 
 static Name
@@ -330,18 +333,27 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
 
   // TFIB takes precedence
   if (auto* tfibEntry = m_tfib.findLongestPrefixMatch(interest.getName())) {
-    const uint64_t tfibFaceId = tfibEntry->getFace().getId();
-    onOutgoingInterest(interest, tfibEntry->getFace(), pitEntry);
-    if (markInterestFlooded(interest)) {
-      NFD_LOG_DEBUG("OptoFlood tfib-forward and flood interest=" << interest.getName()
-                    << " nonce=" << interest.getNonce());
-      handleInterestFlooding(interest, ingress, pitEntry, tfibFaceId);
+    const bool fibHasNextHops = fibEntry.hasNextHops();
+    auto decision = m_tfib.onUse(tfibEntry->getPrefix(), fibHasNextHops, TFIB_IDLE_TTL,
+                                 TFIB_FIB_STABLE_WINDOW);
+    if (decision == table::TfibUseDecision::Retired) {
+      NFD_LOG_DEBUG("OptoFlood tfib-retire prefix=" << tfibEntry->getPrefix()
+                    << " reason=fib-stable");
     }
-    else {
-      NFD_LOG_DEBUG("OptoFlood tfib-forward flood skipped interest=" << interest.getName()
-                    << " nonce=" << interest.getNonce() << " reason=already-flooded");
+    else if (decision == table::TfibUseDecision::Use) {
+      const uint64_t tfibFaceId = tfibEntry->getFace().getId();
+      onOutgoingInterest(interest, tfibEntry->getFace(), pitEntry);
+      if (markInterestFlooded(interest)) {
+        NFD_LOG_DEBUG("OptoFlood tfib-forward and flood interest=" << interest.getName()
+                      << " nonce=" << interest.getNonce());
+        handleInterestFlooding(interest, ingress, pitEntry, tfibFaceId);
+      }
+      else {
+        NFD_LOG_DEBUG("OptoFlood tfib-forward flood skipped interest=" << interest.getName()
+                      << " nonce=" << interest.getNonce() << " reason=already-flooded");
+      }
+      return;
     }
-    return;
   }
 
   if (!fibEntry.hasNextHops()) {

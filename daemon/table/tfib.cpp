@@ -6,7 +6,7 @@
 namespace nfd {
 namespace table {
 
-static constexpr time::milliseconds TFIB_ENTRY_LIFETIME = 1000_ms;
+static constexpr time::milliseconds TFIB_ENTRY_LIFETIME = 5000_ms;
 
 TfibEntry::TfibEntry(const Name& prefix, Face& face,
                      uint32_t newFaceSeq, uint64_t floodId)
@@ -15,6 +15,8 @@ TfibEntry::TfibEntry(const Name& prefix, Face& face,
   , m_expiry(time::steady_clock::now() + TFIB_ENTRY_LIFETIME)
   , m_newFaceSeq(newFaceSeq)
   , m_floodId(floodId)
+  , m_lastUsed(time::steady_clock::now())
+  , m_fibAvailableSince(std::nullopt)
 {
 }
 
@@ -56,6 +58,39 @@ Tfib::insert(const Name& prefix, Face& face, uint32_t seq, uint64_t floodId)
     // Insert new entry
     m_table.insert(std::make_shared<TfibEntry>(prefix, face, seq, floodId));
   }
+}
+
+TfibUseDecision
+Tfib::onUse(const Name& prefix, bool fibAvailable, time::milliseconds idleTtl,
+            time::milliseconds fibStableWindow)
+{
+  auto& prefix_idx = m_table.get<Prefix_>();
+  auto it = prefix_idx.find(prefix);
+  if (it == prefix_idx.end()) {
+    return TfibUseDecision::NotFound;
+  }
+
+  auto now = time::steady_clock::now();
+  auto fibSince = (*it)->m_fibAvailableSince;
+  if (fibAvailable) {
+    if (!fibSince) {
+      fibSince = now;
+    }
+    else if (now - *fibSince >= fibStableWindow) {
+      prefix_idx.erase(it);
+      return TfibUseDecision::Retired;
+    }
+  }
+  else {
+    fibSince.reset();
+  }
+
+  prefix_idx.modify(it, [&] (std::shared_ptr<TfibEntry>& entry) {
+    entry->m_lastUsed = now;
+    entry->m_expiry = now + idleTtl;
+    entry->m_fibAvailableSince = fibSince;
+  });
+  return TfibUseDecision::Use;
 }
 
 void
