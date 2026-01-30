@@ -277,9 +277,8 @@ private:
   void
   handleInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
                          const shared_ptr<pit::Entry>& pitEntry,
-                         std::optional<uint64_t> excludeFaceId = std::nullopt);
-  bool
-  shouldFloodInterest(const Interest& interest);
+                         std::optional<uint64_t> excludeFaceId = std::nullopt,
+                         bool allowIngress = false);
   bool
   checkFloodRate(const ndn::Name& producerPrefix);
   void

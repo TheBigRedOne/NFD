@@ -324,12 +324,7 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
     return;
   }
 
-  // dispatch to strategy: after receive Interest
-  m_strategyChoice.findEffectiveStrategy(*pitEntry)
-    .afterReceiveInterest(interest, FaceEndpoint(ingress.face), pitEntry);
-
   const fib::Entry& fibEntry = m_fib.findLongestPrefixMatch(*pitEntry);
-  const bool consumerIntent = shouldFloodInterest(interest);
 
   // TFIB takes precedence
   if (auto* tfibEntry = m_tfib.findLongestPrefixMatch(interest.getName())) {
@@ -341,46 +336,30 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
                     << " reason=fib-stable");
     }
     else if (decision == table::TfibUseDecision::Use) {
-      const uint64_t tfibFaceId = tfibEntry->getFace().getId();
+      NFD_LOG_DEBUG("OptoFlood tfib-forward interest=" << interest.getName()
+                    << " nonce=" << interest.getNonce());
       onOutgoingInterest(interest, tfibEntry->getFace(), pitEntry);
-      if (markInterestFlooded(interest)) {
-        NFD_LOG_DEBUG("OptoFlood tfib-forward and flood interest=" << interest.getName()
-                      << " nonce=" << interest.getNonce());
-        handleInterestFlooding(interest, ingress, pitEntry, tfibFaceId);
-      }
-      else {
-        NFD_LOG_DEBUG("OptoFlood tfib-forward flood skipped interest=" << interest.getName()
-                      << " nonce=" << interest.getNonce() << " reason=already-flooded");
-      }
       return;
     }
   }
 
-  if (!fibEntry.hasNextHops()) {
-    // If both FIB and TFIB miss, automatically flood once
+  // Continue flooding for Interests already carrying HopLimit
+  if (interest.getHopLimit()) {
     if (markInterestFlooded(interest)) {
-      NFD_LOG_DEBUG("OptoFlood auto-flood interest=" << interest.getName()
+      NFD_LOG_DEBUG("OptoFlood continue flood interest=" << interest.getName()
                     << " nonce=" << interest.getNonce());
       handleInterestFlooding(interest, ingress, pitEntry);
     }
     else {
-      NFD_LOG_DEBUG("OptoFlood skip auto-flood interest=" << interest.getName()
+      NFD_LOG_DEBUG("OptoFlood continue flood skipped interest=" << interest.getName()
                     << " nonce=" << interest.getNonce() << " reason=already-flooded");
     }
     return;
   }
 
-  // Consumer intent: allow explicit flood even when FIB exists
-  if (consumerIntent && markInterestFlooded(interest)) {
-    NFD_LOG_DEBUG("OptoFlood consumer-request flood interest=" << interest.getName()
-                  << " nonce=" << interest.getNonce());
-    handleInterestFlooding(interest, ingress, pitEntry);
-    return;
-  }
-  else if (consumerIntent) {
-    NFD_LOG_DEBUG("OptoFlood consumer-request flood skipped interest=" << interest.getName()
-                  << " nonce=" << interest.getNonce() << " reason=already-flooded");
-  }
+  // dispatch to strategy: after receive Interest
+  m_strategyChoice.findEffectiveStrategy(*pitEntry)
+    .afterReceiveInterest(interest, FaceEndpoint(ingress.face), pitEntry);
 }
 
 void
@@ -968,18 +947,11 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
 }
 
 
-bool
-Forwarder::shouldFloodInterest(const Interest& interest)
-{
-  // Trigger Interest flooding when HopLimit is explicitly present (consumer intent)
-  // Final decision still gated by FIB/TFIB miss at call site
-  return static_cast<bool>(interest.getHopLimit());
-}
-
 void
 Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
                                   const shared_ptr<pit::Entry>& pitEntry,
-                                  std::optional<uint64_t> excludeFaceId)
+                                  std::optional<uint64_t> excludeFaceId,
+                                  bool allowIngress)
 {
   Interest floodInterest = interest;
   if (!floodInterest.getHopLimit()) {
@@ -988,10 +960,10 @@ Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& 
 
   std::unordered_set<uint64_t> sentFaces;
   for (auto& face : m_faceTable) {
-    if (face.getId() == ingress.face.getId()) {
+    if (excludeFaceId && face.getId() == *excludeFaceId) {
       continue;
     }
-    if (excludeFaceId && face.getId() == *excludeFaceId) {
+    if (!allowIngress && face.getId() == ingress.face.getId()) {
       continue;
     }
     if (face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {

@@ -84,7 +84,7 @@ BestRouteStrategy::afterReceiveInterest(const Interest& interest, const FaceEndp
       lp::Nack nackPkt(interest);
       nackPkt.setHeader(nackHeader);
       this->sendNack(nackPkt, ingress.face);
-      this->triggerInterestFlooding(interest, ingress, pitEntry);
+      this->triggerInterestFlooding(interest, ingress, pitEntry, std::nullopt, true);
       return;
     }
 
@@ -116,7 +116,7 @@ BestRouteStrategy::afterReceiveInterest(const Interest& interest, const FaceEndp
     lp::Nack nackPkt(interest);
     nackPkt.setHeader(nackHeader);
     this->sendNack(nackPkt, ingress.face);
-    this->triggerInterestFlooding(interest, ingress, pitEntry);
+    this->triggerInterestFlooding(interest, ingress, pitEntry, std::nullopt, true);
   }
   else {
     Face& outFace = it->getFace();

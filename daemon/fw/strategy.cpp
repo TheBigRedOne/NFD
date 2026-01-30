@@ -312,7 +312,8 @@ Strategy::sendNacks(const lp::NackHeader& header, const shared_ptr<pit::Entry>& 
 bool
 Strategy::triggerInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
                                   const shared_ptr<pit::Entry>& pitEntry,
-                                  std::optional<uint64_t> excludeFaceId)
+                                  std::optional<uint64_t> excludeFaceId,
+                                  bool allowIngress)
 {
   if (!m_forwarder.markInterestFlooded(interest)) {
     NFD_LOG_DEBUG("OptoFlood strategy flood skipped interest=" << interest.getName()
@@ -322,7 +323,7 @@ Strategy::triggerInterestFlooding(const Interest& interest, const FaceEndpoint& 
 
   NFD_LOG_DEBUG("OptoFlood strategy flood interest=" << interest.getName()
                 << " nonce=" << interest.getNonce());
-  m_forwarder.handleInterestFlooding(interest, ingress, pitEntry, excludeFaceId);
+  m_forwarder.handleInterestFlooding(interest, ingress, pitEntry, excludeFaceId, allowIngress);
   return true;
 }
 

@@ -388,12 +388,14 @@ protected: // actions
    * \param ingress the ingress face endpoint of the Interest
    * \param pitEntry the PIT entry associated with the Interest
    * \param excludeFaceId an optional face id to exclude from flooding
+   * \param allowIngress whether flooding may be sent back to ingress
    * \return whether flooding was initiated for this Interest
    */
   bool
   triggerInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
                           const shared_ptr<pit::Entry>& pitEntry,
-                          std::optional<uint64_t> excludeFaceId = std::nullopt);
+                          std::optional<uint64_t> excludeFaceId = std::nullopt,
+                          bool allowIngress = false);
 
   /**
    * \brief Schedule the PIT entry to be erased after \p duration.
