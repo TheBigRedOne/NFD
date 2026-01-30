@@ -328,8 +328,26 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
 
   // TFIB takes precedence
   if (auto* tfibEntry = m_tfib.findLongestPrefixMatch(interest.getName())) {
-    const bool fibHasNextHops = fibEntry.hasNextHops();
-    auto decision = m_tfib.onUse(tfibEntry->getPrefix(), fibHasNextHops, TFIB_IDLE_TTL,
+    Face& tfibFace = tfibEntry->getFace();
+    if (tfibFace.getId() == ingress.face.getId()) {
+      if (!interest.getHopLimit()) {
+        if (markInterestFlooded(interest)) {
+          Interest floodInterest = interest;
+          floodInterest.refreshNonce();
+          markInterestFlooded(floodInterest);
+          NFD_LOG_DEBUG("OptoFlood tfib-ingress flood interest=" << floodInterest.getName()
+                        << " nonce=" << floodInterest.getNonce());
+          handleInterestFlooding(floodInterest, ingress, pitEntry);
+        }
+        else {
+          NFD_LOG_DEBUG("OptoFlood tfib-ingress flood skipped interest=" << interest.getName()
+                        << " nonce=" << interest.getNonce() << " reason=already-flooded");
+        }
+        return;
+      }
+    }
+    const bool fibMatchesTfib = fibEntry.hasNextHop(tfibFace);
+    auto decision = m_tfib.onUse(tfibEntry->getPrefix(), fibMatchesTfib, TFIB_IDLE_TTL,
                                  TFIB_FIB_STABLE_WINDOW);
     if (decision == table::TfibUseDecision::Retired) {
       NFD_LOG_DEBUG("OptoFlood tfib-retire prefix=" << tfibEntry->getPrefix()

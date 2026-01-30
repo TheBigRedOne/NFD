@@ -131,6 +131,14 @@ void
 BestRouteStrategy::afterReceiveNack(const lp::Nack& nack, const FaceEndpoint& ingress,
                                     const shared_ptr<pit::Entry>& pitEntry)
 {
+  const Interest& interest = nack.getInterest();
+  if (nack.getReason() == lp::NackReason::NO_ROUTE) {
+    NFD_LOG_DEBUG("OptoFlood nack-trigger flood interest=" << interest.getName()
+                  << " nonce=" << interest.getNonce() << " reason=" << nack.getReason());
+    if (this->triggerInterestFlooding(interest, ingress, pitEntry, ingress.face.getId())) {
+      this->setExpiryTimer(pitEntry, interest.getInterestLifetime());
+    }
+  }
   this->processNack(nack, ingress.face, pitEntry);
 }
 
