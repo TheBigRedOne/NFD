@@ -321,9 +321,12 @@ Strategy::triggerInterestFlooding(const Interest& interest, const FaceEndpoint& 
     return false;
   }
 
-  NFD_LOG_DEBUG("OptoFlood strategy flood interest=" << interest.getName()
-                << " nonce=" << interest.getNonce());
-  m_forwarder.handleInterestFlooding(interest, ingress, pitEntry, excludeFaceId, allowIngress);
+  Interest floodInterest = interest;
+  floodInterest.refreshNonce();
+  m_forwarder.markInterestFlooded(floodInterest);
+  NFD_LOG_DEBUG("OptoFlood strategy flood interest=" << floodInterest.getName()
+                << " nonce=" << floodInterest.getNonce());
+  m_forwarder.handleInterestFlooding(floodInterest, ingress, pitEntry, excludeFaceId, allowIngress);
   return true;
 }
 
