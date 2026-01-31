@@ -346,8 +346,16 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
         return;
       }
     }
-    const bool fibMatchesTfib = fibEntry.hasNextHop(tfibFace);
-    auto decision = m_tfib.onUse(tfibEntry->getPrefix(), fibMatchesTfib, TFIB_IDLE_TTL,
+    bool fibHasP2pNextHop = false;
+    for (const auto& nh : fibEntry.getNextHops()) {
+      if (nh.getFace().getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+        fibHasP2pNextHop = true;
+        break;
+      }
+    }
+    const bool tfibIsP2p = tfibFace.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT;
+    const bool fibStableCandidate = tfibIsP2p ? fibEntry.hasNextHop(tfibFace) : fibHasP2pNextHop;
+    auto decision = m_tfib.onUse(tfibEntry->getPrefix(), fibStableCandidate, TFIB_IDLE_TTL,
                                  TFIB_FIB_STABLE_WINDOW);
     if (decision == table::TfibUseDecision::Retired) {
       NFD_LOG_DEBUG("OptoFlood tfib-retire prefix=" << tfibEntry->getPrefix()
@@ -840,12 +848,19 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
   // Update TFIB
   std::optional<uint32_t> newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo());
   if (newFaceSeqOpt) {
-    m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
-    NFD_LOG_DEBUG("OptoFlood TFIB update prefix=" << data.getName().getPrefix(-1)
-                  << " face=" << ingress.face.getId()
-                  << " newFaceSeq=" << *newFaceSeqOpt
-                  << " floodId=" << *floodIdOpt);
-    triggerFastLsaIfNeeded(data.getName().getPrefix(-1), ingress.face, newFaceSeqOpt);
+    if (ingress.face.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+      m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
+      NFD_LOG_DEBUG("OptoFlood TFIB update prefix=" << data.getName().getPrefix(-1)
+                    << " face=" << ingress.face.getId()
+                    << " newFaceSeq=" << *newFaceSeqOpt
+                    << " floodId=" << *floodIdOpt);
+      triggerFastLsaIfNeeded(data.getName().getPrefix(-1), ingress.face, newFaceSeqOpt);
+    }
+    else {
+      NFD_LOG_DEBUG("OptoFlood TFIB skip prefix=" << data.getName().getPrefix(-1)
+                    << " face=" << ingress.face.getId()
+                    << " reason=non-p2p-ingress");
+    }
   }
   else {
     NFD_LOG_DEBUG("OptoFlood data=" << data.getName()
@@ -916,6 +931,9 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
       if (out.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
         continue;
       }
+      if (out.getLinkType() != ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+        continue;
+      }
       outFaces.push_back(&out);
     }
   }
@@ -930,6 +948,9 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
         continue;
       }
       if (f.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+        continue;
+      }
+      if (f.getLinkType() != ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
         continue;
       }
       outFaces.push_back(&f);
@@ -985,6 +1006,9 @@ Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& 
       continue;
     }
     if (face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+      continue;
+    }
+    if (face.getLinkType() != ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
       continue;
     }
     if (!sentFaces.insert(face.getId()).second) {
