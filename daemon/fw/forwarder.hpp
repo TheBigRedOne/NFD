@@ -352,10 +352,17 @@ private:
   // OptoFlood constants
   static constexpr time::milliseconds TFIB_CLEANUP_INTERVAL = 100_ms;
   static constexpr time::seconds FLOOD_RATE_RESET_INTERVAL = 1_s;
+  // Blind-flood radius for Interests when the temporary reverse path loops back.
   static constexpr uint8_t OPTOFLOOD_HOP_LIMIT = 3;
+  // Blind-flood radius for Data at nodes lacking a FIB next-hop. Defensive
+  // fallback: inert when the producer prefix is advertised network-wide.
+  static constexpr uint8_t OPTOFLOOD_DATA_HOP_LIMIT = 1;
   static constexpr size_t OPTOFLOOD_RATE_LIMIT = 100; // packets per second
   static constexpr time::milliseconds INTEREST_FLOOD_CACHE_TTL = 1000_ms;
   static constexpr time::milliseconds INTEREST_FLOOD_CLEANUP_INTERVAL = 100_ms;
+  // Upper bound on distinct FloodIds retained for duplicate suppression; the
+  // cache is cleared on overflow to bound memory (see handleOptoFloodData).
+  static constexpr size_t OPTOFLOOD_FLOOD_ID_CACHE_MAX = 4096;
 
   // allow Strategy (base class) to enter pipelines
   friend ::nfd::fw::Strategy;

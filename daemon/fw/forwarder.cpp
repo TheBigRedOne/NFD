@@ -836,50 +836,71 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
                   << " ingress=" << ingress.face.getId());
     return; // Already processed this flood packet
   }
+  if (m_floodIdCache.size() >= OPTOFLOOD_FLOOD_ID_CACHE_MAX) {
+    // Bound memory. FloodIds are rate-limited and accumulate slowly, while
+    // duplicates of a given flood arrive within sub-second propagation. Clearing
+    // before inserting the current FloodId drops only long-past entries and never
+    // an in-flight duplicate.
+    m_floodIdCache.clear();
+  }
   m_floodIdCache.insert(*floodIdOpt);
 
-  // Rate Limiting
-  if (!checkFloodRate(data.getName().getPrefix(-1))) {
-    NFD_LOG_WARN("OptoFlood rate-limit drop data=" << data.getName()
-                 << " floodId=" << *floodIdOpt);
-    return; // Rate limit exceeded for this producer
-  }
-
-  // Update TFIB
-  std::optional<uint32_t> newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo());
-  if (newFaceSeqOpt) {
-    if (ingress.face.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
-      m_tfib.insert(data.getName().getPrefix(-1), ingress.face, *newFaceSeqOpt, *floodIdOpt);
-      NFD_LOG_DEBUG("OptoFlood TFIB update prefix=" << data.getName().getPrefix(-1)
-                    << " face=" << ingress.face.getId()
-                    << " newFaceSeq=" << *newFaceSeqOpt
-                    << " floodId=" << *floodIdOpt);
-      triggerFastLsaIfNeeded(data.getName().getPrefix(-1), ingress.face, newFaceSeqOpt);
-    }
-    else {
-      NFD_LOG_DEBUG("OptoFlood TFIB skip prefix=" << data.getName().getPrefix(-1)
-                    << " face=" << ingress.face.getId()
-                    << " reason=non-p2p-ingress");
-    }
-  }
-  else {
-    NFD_LOG_DEBUG("OptoFlood data=" << data.getName()
-                  << " floodId=" << *floodIdOpt
-                  << " missing NewFaceSeq");
-  }
-
-  const Name floodPrefix = data.getName().getPrefix(-1);
-  const auto& fibEntry = m_fib.findLongestPrefixMatch(floodPrefix);
+  // Derive the routable prefix from the routing layer (FIB longest-prefix match)
+  // instead of a fixed name-component offset. This keys OptoFlood state
+  // (rate limiting, TFIB, Fast-LSA) on the advertised producer prefix and makes
+  // it independent of the application naming below that prefix (e.g. version and
+  // segment components), so Data naming changes do not require forwarder changes.
+  const fib::Entry& fibEntry = m_fib.findLongestPrefixMatch(data.getName());
+  const Name producerPrefix = fibEntry.getPrefix();
   const bool hasFibNextHops = fibEntry.hasNextHops();
 
+  // OptoFlood state must be keyed on a routable prefix. If no FIB entry covers the
+  // Data name (empty match, or only a default route), there is no meaningful key:
+  // skip rate limiting, TFIB and Fast-LSA rather than key on the root prefix
+  // (over-broad, would capture all Interests) or a per-frame component (ineffective
+  // for other frames). The Data still propagates via the flooding path below.
+  if (!producerPrefix.empty()) {
+    // Rate Limiting
+    if (!checkFloodRate(producerPrefix)) {
+      NFD_LOG_WARN("OptoFlood rate-limit drop data=" << data.getName()
+                   << " floodId=" << *floodIdOpt);
+      return; // Rate limit exceeded for this producer
+    }
+
+    // Update TFIB
+    std::optional<uint32_t> newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo());
+    if (newFaceSeqOpt) {
+      if (ingress.face.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+        m_tfib.insert(producerPrefix, ingress.face, *newFaceSeqOpt, *floodIdOpt);
+        NFD_LOG_DEBUG("OptoFlood TFIB update prefix=" << producerPrefix
+                      << " face=" << ingress.face.getId()
+                      << " newFaceSeq=" << *newFaceSeqOpt
+                      << " floodId=" << *floodIdOpt);
+        triggerFastLsaIfNeeded(producerPrefix, ingress.face, newFaceSeqOpt);
+      }
+      else {
+        NFD_LOG_DEBUG("OptoFlood TFIB skip prefix=" << producerPrefix
+                      << " face=" << ingress.face.getId()
+                      << " reason=non-p2p-ingress");
+      }
+    }
+    else {
+      NFD_LOG_DEBUG("OptoFlood data=" << data.getName()
+                    << " floodId=" << *floodIdOpt
+                    << " missing NewFaceSeq");
+    }
+  }
+
   uint64_t hopLimit = 0;
+  // No FIB next-hop: fall back to hop-limited blind flooding over adjacent faces.
+  // Defensive path, inert when the producer prefix is advertised network-wide.
   const bool useHopLimit = !hasFibNextHops;
   if (useHopLimit) {
     if (auto tag = data.getTag<ndn::lp::OptoHopLimit>()) {
       hopLimit = *tag;
     }
     else {
-      hopLimit = 1;
+      hopLimit = OPTOFLOOD_DATA_HOP_LIMIT;
     }
   }
   else if (auto tag = data.getTag<ndn::lp::OptoHopLimit>()) {
