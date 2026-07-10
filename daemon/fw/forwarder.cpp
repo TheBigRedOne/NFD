@@ -38,10 +38,6 @@
 
 #include <ndn-cxx/lp/pit-token.hpp>
 #include <ndn-cxx/lp/tags.hpp>
-#include <ndn-cxx/mgmt/control-parameters.hpp>
-#include <ndn-cxx/mgmt/nfd/command-options.hpp>
-#include <ndn-cxx/mgmt/nfd/control-command.hpp>
-#include <ndn-cxx/mgmt/control-response.hpp>
 #include <boost/endian/conversion.hpp>
 #include <cstring>
 
@@ -52,21 +48,6 @@ NFD_LOG_INIT(Forwarder);
 const std::string CFG_FORWARDER = "forwarder";
 
 namespace {
-
-class FastLsaTriggerCommand : public ndn::nfd::ControlCommand
-{
-public:
-  FastLsaTriggerCommand()
-    : ControlCommand("fast-lsa", "trigger")
-  {
-    m_requestValidator
-      .required(ndn::nfd::CONTROL_PARAMETER_NAME)
-      .optional(ndn::nfd::CONTROL_PARAMETER_FACE_ID)
-      .optional(ndn::nfd::CONTROL_PARAMETER_EXPIRATION_PERIOD)
-      .optional(ndn::nfd::CONTROL_PARAMETER_COST);
-    m_responseValidator = m_requestValidator;
-  }
-};
 
 constexpr time::milliseconds TFIB_IDLE_TTL = 5000_ms;
 constexpr time::milliseconds TFIB_FIB_STABLE_WINDOW = 5000_ms;
@@ -847,7 +828,7 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
 
   // Derive the routable prefix from the routing layer (FIB longest-prefix match)
   // instead of a fixed name-component offset. This keys OptoFlood state
-  // (rate limiting, TFIB, Fast-LSA) on the advertised producer prefix and makes
+  // (rate limiting, TFIB) on the advertised producer prefix and makes
   // it independent of the application naming below that prefix (e.g. version and
   // segment components), so Data naming changes do not require forwarder changes.
   const fib::Entry& fibEntry = m_fib.findLongestPrefixMatch(data.getName());
@@ -856,7 +837,7 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
 
   // OptoFlood state must be keyed on a routable prefix. If no FIB entry covers the
   // Data name (empty match, or only a default route), there is no meaningful key:
-  // skip rate limiting, TFIB and Fast-LSA rather than key on the root prefix
+  // skip rate limiting and TFIB rather than key on the root prefix
   // (over-broad, would capture all Interests) or a per-frame component (ineffective
   // for other frames). The Data still propagates via the flooding path below.
   if (!producerPrefix.empty()) {
@@ -876,7 +857,6 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
                       << " face=" << ingress.face.getId()
                       << " newFaceSeq=" << *newFaceSeqOpt
                       << " floodId=" << *floodIdOpt);
-        triggerFastLsaIfNeeded(producerPrefix, ingress.face, newFaceSeqOpt);
       }
       else {
         NFD_LOG_DEBUG("OptoFlood TFIB skip prefix=" << producerPrefix
@@ -1059,38 +1039,6 @@ Forwarder::checkFloodRate(const ndn::Name& producerPrefix)
     return false;
   }
   return true;
-}
-
-void
-Forwarder::triggerFastLsaIfNeeded(const ndn::Name& producerPrefix, const Face& face,
-                                  std::optional<uint32_t> newFaceSeq)
-{
-  if (!m_internalController) {
-    return;
-  }
-
-  auto now = time::steady_clock::now();
-  auto it = m_fastLsaThrottle.find(producerPrefix);
-  if (it != m_fastLsaThrottle.end() && (now - it->second) < FAST_LSA_THROTTLE) {
-    return;
-  }
-  m_fastLsaThrottle[producerPrefix] = now;
-
-  ndn::nfd::ControlParameters params;
-  params.setName(producerPrefix)
-        .setFaceId(face.getId())
-        .setExpirationPeriod(FAST_LSA_LIFETIME);
-  if (newFaceSeq) {
-    params.setCost(*newFaceSeq);
-  }
-
-  ndn::nfd::CommandOptions opts;
-  opts.setPrefix(ndn::Name("/localhost/nlsr"));
-  m_internalController->start<FastLsaTriggerCommand>(
-    params,
-    [] (const ndn::nfd::ControlParameters&) {},
-    [] (const ndn::nfd::ControlResponse&) {},
-    opts);
 }
 
 void

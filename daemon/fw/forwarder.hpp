@@ -43,7 +43,6 @@
 #include <unordered_set>
 
 #include <ndn-cxx/lp/tags.hpp>
-#include <ndn-cxx/mgmt/nfd/controller.hpp>
 #include <ndn-cxx/name.hpp>
 #include <ndn-cxx/util/scheduler.hpp>
 #include <ndn-cxx/util/time.hpp>
@@ -77,12 +76,6 @@ public:
   virtual
   ~Forwarder() = default;
 #endif
-
-  void
-  setInternalController(const std::shared_ptr<ndn::nfd::Controller>& controller)
-  {
-    m_internalController = controller;
-  }
 
   const ForwarderCounters&
   getCounters() const noexcept
@@ -281,9 +274,6 @@ private:
                          bool allowIngress = false);
   bool
   checkFloodRate(const ndn::Name& producerPrefix);
-  void
-  triggerFastLsaIfNeeded(const ndn::Name& producerPrefix, const Face& face,
-                         std::optional<uint32_t> newFaceSeq);
 
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
@@ -341,13 +331,6 @@ private:
                                                 InterestFloodKeyHash>;
   InterestFloodCache m_interestFloodCache;
   ndn::scheduler::ScopedEventId m_interestFloodCleanupEvent;
-
-  // Fast-LSA trigger support (uses internal Controller)
-  std::shared_ptr<ndn::nfd::Controller> m_internalController;
-  std::unordered_map<ndn::Name, ndn::time::steady_clock::time_point, std::hash<ndn::Name>> m_fastLsaThrottle;
-
-  static constexpr ndn::time::milliseconds FAST_LSA_LIFETIME = 1000_ms;
-  static constexpr ndn::time::milliseconds FAST_LSA_THROTTLE = 500_ms;
 
   // OptoFlood constants
   static constexpr time::milliseconds TFIB_CLEANUP_INTERVAL = 100_ms;

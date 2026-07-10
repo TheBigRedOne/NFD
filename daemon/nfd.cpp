@@ -135,7 +135,6 @@ Nfd::initializeManagement()
   std::tie(m_internalFace, m_internalClientFace) = face::makeInternalFace(m_keyChain);
   m_faceTable->addReserved(m_internalFace, face::FACEID_INTERNAL_FACE);
 
-  m_internalController = std::make_shared<ndn::nfd::Controller>(*m_internalClientFace, m_keyChain);
   m_dispatcher = make_unique<ndn::mgmt::Dispatcher>(*m_internalClientFace, m_keyChain);
   m_authenticator = CommandAuthenticator::create();
 
@@ -176,9 +175,6 @@ Nfd::initializeManagement()
   fib::Entry* entry = m_forwarder->getFib().insert(topPrefix).first;
   m_forwarder->getFib().addOrUpdateNextHop(*entry, *m_internalFace, 0);
   m_dispatcher->addTopPrefix(topPrefix, false);
-
-  // Provide forwarder with internal controller for Fast-LSA triggers
-  m_forwarder->setInternalController(m_internalController);
 }
 
 void
