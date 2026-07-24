@@ -190,6 +190,11 @@ GenericLinkService::encodeLpFields(const ndn::PacketBase& netPkt, lp::Packet& lp
     lpPacket.add<lp::OptoMobilityFlagField>(lp::EmptyValue());
     NFD_LOG_FACE_TRACE("encode OptoMobilityFlag");
   }
+  // OptoFlood: encode LP MobilityEpoch if present
+  if (const auto epoch = netPkt.getTag<lp::OptoMobilityEpoch>()) {
+    lpPacket.add<lp::OptoMobilityEpochField>(*epoch);
+    NFD_LOG_FACE_TRACE("encode OptoMobilityEpoch=" << *epoch);
+  }
 }
 
 void
@@ -477,6 +482,12 @@ GenericLinkService::decodeData(const Block& netPkt, const lp::Packet& firstPkt,
   if (firstPkt.has<lp::OptoMobilityFlagField>()) {
     data->setTag(make_shared<lp::OptoMobilityFlag>(lp::EmptyValue()));
     NFD_LOG_FACE_TRACE("decode OptoMobilityFlag");
+  }
+  // OptoFlood: decode LP MobilityEpoch onto Data tag
+  if (firstPkt.has<lp::OptoMobilityEpochField>()) {
+    const auto epochField = firstPkt.get<lp::OptoMobilityEpochField>();
+    data->setTag(make_shared<lp::OptoMobilityEpoch>(epochField));
+    NFD_LOG_FACE_TRACE("decode OptoMobilityEpoch=" << epochField);
   }
 
   this->receiveData(*data, endpointId);

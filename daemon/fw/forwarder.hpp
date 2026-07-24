@@ -46,6 +46,7 @@
 #include <ndn-cxx/name.hpp>
 #include <ndn-cxx/util/scheduler.hpp>
 #include <ndn-cxx/util/time.hpp>
+#include <map>
 #include <optional>
 #include <memory>
 
@@ -275,6 +276,16 @@ private:
   bool
   checkFloodRate(const ndn::Name& producerPrefix);
 
+  /** \brief Arm OptoFlood business-Data mobility marking for a producer prefix.
+   *
+   *  Driven by the local OptoFlood daemon via /localhost/nfd/optoflood/arm/<prefix>.
+   *  Snapshots the names pending under the prefix (excluding the guard
+   *  sub-namespace) at this instant; the local producer's Data satisfying those
+   *  names is then LP-marked and flooded, then removed from the snapshot.
+   */
+  void
+  armOptoFlood(const Name& mobilePrefix);
+
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
    * \brief Configuration options from the `forwarder` section.
@@ -305,6 +316,18 @@ private:
   // OptoFlood members
   table::Tfib m_tfib;
   ndn::scheduler::ScopedEventId m_tfibCleanupEvent;
+
+  // OptoFlood business-Data mobility-marking arm state (keyed by mobile prefix).
+  // Populated by armOptoFlood(): each entry holds the mobility epoch and the set
+  // of stranded PIT names pending at arm time. Consumed as the local producer
+  // answers them; erased when drained or after OPTOFLOOD_ARM_MAX_LIFETIME.
+  struct OptoFloodArm {
+    uint32_t epoch = 0;
+    std::unordered_set<Name> strandedNames;
+    ndn::time::steady_clock::time_point expiry;
+  };
+  std::map<Name, OptoFloodArm> m_optoFloodArm;
+  std::map<Name, uint32_t> m_optoFloodEpoch; // persistent per-prefix mobility epoch
 
   // Flood control members
   using FloodIdCache = std::unordered_set<uint64_t>;
@@ -346,6 +369,9 @@ private:
   // Upper bound on distinct FloodIds retained for duplicate suppression; the
   // cache is cleared on overflow to bound memory (see handleOptoFloodData).
   static constexpr size_t OPTOFLOOD_FLOOD_ID_CACHE_MAX = 4096;
+  // Safety lifetime of a business-marking arm entry. Marking itself is gated by
+  // the stranded-name snapshot (not this window); this only bounds cleanup.
+  static constexpr time::milliseconds OPTOFLOOD_ARM_MAX_LIFETIME = 10000_ms;
 
   // allow Strategy (base class) to enter pipelines
   friend ::nfd::fw::Strategy;

@@ -52,6 +52,25 @@ namespace {
 constexpr time::milliseconds TFIB_IDLE_TTL = 5000_ms;
 constexpr time::milliseconds TFIB_FIB_STABLE_WINDOW = 5000_ms;
 
+// Local command prefix by which the OptoFlood daemon arms business-Data mobility
+// marking: /localhost/nfd/optoflood/arm/<mobilePrefix...>.
+const Name OPTOFLOOD_ARM_PREFIX("/localhost/nfd/optoflood/arm");
+
+// Derive a stable, hop-consistent FloodId for NFD-marked business Data from the
+// Data name wire (unique per content Data; identical at every hop because the
+// signed Data is not modified in forwarding). FNV-1a 64-bit.
+uint64_t
+deriveOptoFloodId(const Data& data)
+{
+  const Block& nameWire = data.getName().wireEncode();
+  uint64_t h = 1469598103934665603ULL;
+  for (uint8_t b : nameWire) {
+    h ^= b;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
 } // namespace
 
 static Name
@@ -204,6 +223,16 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
     NFD_LOG_DEBUG("onIncomingInterest in=" << ingress << " interest=" << interest.getName()
                   << " nonce=" << nonce << " violates /localhost");
     // drop
+    return;
+  }
+
+  // OptoFlood: intercept the local mobility-arm command from the OptoFlood daemon.
+  // /localhost/nfd/optoflood/arm/<mobilePrefix...> arms business-Data marking for
+  // the given prefix; the Interest is consumed here (not inserted into the PIT).
+  if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL &&
+      OPTOFLOOD_ARM_PREFIX.isPrefixOf(interest.getName()) &&
+      interest.getName().size() > OPTOFLOOD_ARM_PREFIX.size()) {
+    this->armOptoFlood(interest.getName().getSubName(OPTOFLOOD_ARM_PREFIX.size()));
     return;
   }
 
@@ -457,6 +486,32 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
   // PIT match
   pit::DataMatchResult pitMatches = m_pit.findAllDataMatches(data);
 
+  // OptoFlood: business-Data mobility marking. If armed for a covering prefix and
+  // this Data arrives from a local producer face satisfying a name that was
+  // pending at arm time (stranded set), LP-mark it (MobilityFlag + epoch) so it
+  // floods like guard Data. Marking is set-based: each stranded name is marked
+  // once and the arm entry is erased when drained (or after its safety lifetime).
+  if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL && !m_optoFloodArm.empty()) {
+    auto armNow = time::steady_clock::now();
+    for (auto armIt = m_optoFloodArm.begin(); armIt != m_optoFloodArm.end(); ) {
+      auto& arm = armIt->second;
+      auto sIt = arm.strandedNames.find(data.getName());
+      if (sIt != arm.strandedNames.end()) {
+        const_cast<Data&>(data).setTag(make_shared<lp::OptoMobilityFlag>(lp::EmptyValue()));
+        const_cast<Data&>(data).setTag(make_shared<lp::OptoMobilityEpoch>(arm.epoch));
+        arm.strandedNames.erase(sIt);
+        NFD_LOG_DEBUG("OptoFlood business-mark data=" << data.getName()
+                      << " prefix=" << armIt->first << " epoch=" << arm.epoch);
+      }
+      if (arm.strandedNames.empty() || arm.expiry <= armNow) {
+        armIt = m_optoFloodArm.erase(armIt);
+      }
+      else {
+        ++armIt;
+      }
+    }
+  }
+
   // OptoFlood: Treat as mobility Data if LP.MobilityFlag is present, or FloodId exists (MetaInfo)
   bool isOptoFloodData = (data.getTag<ndn::lp::OptoMobilityFlag>() != nullptr) ||
                          (::ndn::optoflood::getFloodId(data.getMetaInfo()).has_value());
@@ -510,6 +565,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     // and by removing tags from the in-memory Data before onOutgoingData.
     const_cast<Data&>(data).removeTag<ndn::lp::OptoMobilityFlag>();
     const_cast<Data&>(data).removeTag<ndn::lp::OptoHopLimit>();
+    const_cast<Data&>(data).removeTag<ndn::lp::OptoMobilityEpoch>();
   }
   // when more than one PIT entry is matched, trigger strategy: before satisfy Interest,
   // and send Data to all matched out faces
@@ -548,6 +604,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     // OptoFlood: clear LP mobility semantics before satisfying downstreams (stop flooding)
     const_cast<Data&>(data).removeTag<ndn::lp::OptoMobilityFlag>();
     const_cast<Data&>(data).removeTag<ndn::lp::OptoHopLimit>();
+    const_cast<Data&>(data).removeTag<ndn::lp::OptoMobilityEpoch>();
 
     for (Face* pendingDownstream : pendingDownstreams) {
       if (pendingDownstream->getId() == ingress.face.getId() &&
@@ -801,10 +858,42 @@ Forwarder::processConfig(const ConfigSection& configSection, bool isDryRun, cons
 // --- OptoFlood Implementation ---
 
 void
+Forwarder::armOptoFlood(const Name& mobilePrefix)
+{
+  uint32_t epoch = ++m_optoFloodEpoch[mobilePrefix];
+
+  OptoFloodArm arm;
+  arm.epoch = epoch;
+  arm.expiry = time::steady_clock::now() + OPTOFLOOD_ARM_MAX_LIFETIME;
+
+  // Snapshot the stranded set: names pending under the mobile prefix at this
+  // instant, excluding the guard sub-namespace (guard Data floods via its own
+  // MetaInfo path). The producer's Data satisfying these names will be marked.
+  const Name guardPrefix = Name(mobilePrefix).append(ndn::name::Component("_guard"));
+  for (const auto& pitEntry : m_pit) {
+    const Name& name = pitEntry.getName();
+    if (mobilePrefix.isPrefixOf(name) && !guardPrefix.isPrefixOf(name) && !pitEntry.isSatisfied) {
+      arm.strandedNames.insert(name);
+    }
+  }
+
+  size_t stranded = arm.strandedNames.size();
+  m_optoFloodArm[mobilePrefix] = std::move(arm);
+  NFD_LOG_DEBUG("OptoFlood arm prefix=" << mobilePrefix << " epoch=" << epoch
+                << " stranded=" << stranded);
+}
+
+void
 Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
                                const std::unordered_set<uint64_t>& suppressedFaces)
 {
+  // FloodId source: signed MetaInfo (guard Data, daemon-written) if present;
+  // otherwise derive a stable, hop-consistent FloodId from the Data name for
+  // NFD-marked business Data (LP OptoMobilityFlag set on the producer egress).
   auto floodIdOpt = ::ndn::optoflood::getFloodId(data.getMetaInfo());
+  if (!floodIdOpt && data.getTag<ndn::lp::OptoMobilityFlag>() != nullptr) {
+    floodIdOpt = deriveOptoFloodId(data);
+  }
   if (!floodIdOpt) {
     NFD_LOG_DEBUG("OptoFlood skip data=" << data.getName() << " reason=no FloodId");
     return; // Malformed, no FloodId
@@ -848,8 +937,15 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
       return; // Rate limit exceeded for this producer
     }
 
-    // Update TFIB
+    // Update TFIB. Epoch (NewFaceSeq) source: signed MetaInfo (guard Data) if
+    // present; otherwise the hop-by-hop LP OptoMobilityEpoch (NFD-marked business
+    // Data). Both count the same mobility events, keeping TFIB ordering consistent.
     std::optional<uint32_t> newFaceSeqOpt = ::ndn::optoflood::getNewFaceSeq(data.getMetaInfo());
+    if (!newFaceSeqOpt) {
+      if (auto epochTag = data.getTag<ndn::lp::OptoMobilityEpoch>()) {
+        newFaceSeqOpt = static_cast<uint32_t>(*epochTag);
+      }
+    }
     if (newFaceSeqOpt) {
       if (ingress.face.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
         m_tfib.insert(producerPrefix, ingress.face, *newFaceSeqOpt, *floodIdOpt);
