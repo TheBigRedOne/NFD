@@ -56,6 +56,23 @@ constexpr time::milliseconds TFIB_FIB_STABLE_WINDOW = 5000_ms;
 // marking: /localhost/nfd/optoflood/arm/<mobilePrefix...>.
 const Name OPTOFLOOD_ARM_PREFIX("/localhost/nfd/optoflood/arm");
 
+// Reserved final name component of the OptoFlood guard sub-namespace:
+// guardPrefix = <mobilePrefix>/_guard. The OptoFlood daemon registers this
+// sub-namespace with the local forwarder, so guard Interests are demultiplexed to
+// the daemon instead of the baseline producer application.
+const ndn::name::Component OPTOFLOOD_GUARD_MARKER("_guard");
+
+/** \brief Whether \p name is an OptoFlood guard name (<mobilePrefix>/_guard).
+ *
+ *  The whole final component is compared, not a substring, so ordinary content
+ *  names are never misclassified as guard names.
+ */
+bool
+isOptoFloodGuardName(const Name& name)
+{
+  return name.size() >= 2 && name.get(-1) == OPTOFLOOD_GUARD_MARKER;
+}
+
 // Derive a stable, hop-consistent FloodId for NFD-marked business Data from the
 // Data name wire (unique per content Data; identical at every hop because the
 // signed Data is not modified in forwarding). FNV-1a 64-bit.
@@ -515,6 +532,19 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
   // OptoFlood: Treat as mobility Data if LP.MobilityFlag is present, or FloodId exists (MetaInfo)
   bool isOptoFloodData = (data.getTag<ndn::lp::OptoMobilityFlag>() != nullptr) ||
                          (::ndn::optoflood::getFloodId(data.getMetaInfo()).has_value());
+
+  // Pull-semantics invariant: a Data injected by a local application (the producer
+  // application or the OptoFlood daemon) must not start a flood when nothing is
+  // pending for it here any more. Remote ingress is deliberately exempt: a flooded
+  // Data legitimately reaches nodes that hold no PIT entry for it, which is the
+  // very purpose of flooding.
+  if (isOptoFloodData && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL &&
+      pitMatches.empty()) {
+    NFD_LOG_DEBUG("OptoFlood skip data=" << data.getName()
+                  << " reason=local-injection-without-pit");
+    isOptoFloodData = false;
+  }
+
   if (isOptoFloodData) {
     std::unordered_set<uint64_t> suppressedFaces;
     suppressedFaces.insert(ingress.face.getId());
@@ -869,7 +899,7 @@ Forwarder::armOptoFlood(const Name& mobilePrefix)
   // Snapshot the stranded set: names pending under the mobile prefix at this
   // instant, excluding the guard sub-namespace (guard Data floods via its own
   // MetaInfo path). The producer's Data satisfying these names will be marked.
-  const Name guardPrefix = Name(mobilePrefix).append(ndn::name::Component("_guard"));
+  const Name guardPrefix = Name(mobilePrefix).append(OPTOFLOOD_GUARD_MARKER);
   for (const auto& pitEntry : m_pit) {
     const Name& name = pitEntry.getName();
     if (mobilePrefix.isPrefixOf(name) && !guardPrefix.isPrefixOf(name) && !pitEntry.isSatisfied) {
@@ -920,7 +950,18 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
   // (rate limiting, TFIB) on the advertised producer prefix and makes
   // it independent of the application naming below that prefix (e.g. version and
   // segment components), so Data naming changes do not require forwarder changes.
-  const fib::Entry& fibEntry = m_fib.findLongestPrefixMatch(data.getName());
+  // Guard Data (<mobilePrefix>/_guard) is a mobility-control packet belonging to its
+  // parent mobile prefix. Resolve it from the naming convention rather than from the
+  // Data name, so that the guard's own FIB entry - which exists only to demultiplex
+  // guard Interests to the local OptoFlood daemon - never becomes the mobility state
+  // key or the flooding reference. Guard Data is then handled exactly like business
+  // Data of the same mobile prefix.
+  Name lookupName = data.getName();
+  if (isOptoFloodGuardName(lookupName)) {
+    lookupName = lookupName.getPrefix(-1);
+  }
+
+  const fib::Entry& fibEntry = m_fib.findLongestPrefixMatch(lookupName);
   const Name producerPrefix = fibEntry.getPrefix();
   const bool hasFibNextHops = fibEntry.hasNextHops();
 
@@ -947,7 +988,17 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
       }
     }
     if (newFaceSeqOpt) {
-      if (ingress.face.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+      // A TFIB entry records which network direction leads to the moved producer, so
+      // it may only be learned from a remote ingress. A local application face (the
+      // producer application or the OptoFlood daemon) carries no path information:
+      // installing it would make locally injected Data divert subsequent Interests to
+      // that application instead of forwarding them along the repaired path.
+      if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+        NFD_LOG_DEBUG("OptoFlood TFIB skip prefix=" << producerPrefix
+                      << " face=" << ingress.face.getId()
+                      << " reason=local-ingress");
+      }
+      else if (ingress.face.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
         m_tfib.insert(producerPrefix, ingress.face, *newFaceSeqOpt, *floodIdOpt);
         NFD_LOG_DEBUG("OptoFlood TFIB update prefix=" << producerPrefix
                       << " face=" << ingress.face.getId()
