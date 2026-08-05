@@ -9,6 +9,7 @@
 #include <ndn-cxx/util/time.hpp>
 
 #include <optional>
+#include <vector>
 #include <boost/multi_index_container.hpp>
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/member.hpp>
@@ -20,6 +21,20 @@ class Face; // Correct forward declaration in the correct namespace
 }
 
 namespace table {
+
+/**
+ * @brief Lifecycle state of a TFIB entry.
+ *
+ * An Active entry is on the forwarding fast path and therefore bypasses the
+ * forwarding strategy. Once the FIB can forward equivalently, the entry moves to
+ * Standby: strategy control returns to the normal pipeline, but the entry is kept
+ * as a fallback in case the routing plane later loses the prefix again.
+ */
+enum class TfibEntryState
+{
+  Active,
+  Standby
+};
 
 /**
  * @brief An entry in the Temporary Forwarding Information Base (TFIB).
@@ -48,6 +63,12 @@ public:
   uint64_t
   getFloodId() const { return m_floodId; }
 
+  TfibEntryState
+  getState() const { return m_state; }
+
+  bool
+  isRouteReady() const { return m_routeReady; }
+
 public:
   // These members must be public for boost::multi_index::member
   Name m_prefix;
@@ -57,6 +78,19 @@ public:
   uint64_t m_floodId;
   time::steady_clock::time_point m_lastUsed;
   std::optional<time::steady_clock::time_point> m_fibAvailableSince;
+  TfibEntryState m_state;
+  /**
+   * Absolute upper bound on the entry's lifetime, armed when the entry first
+   * enters Standby. It survives a later fallback to Active so that a persistently
+   * broken routing plane cannot keep the entry alive indefinitely.
+   */
+  std::optional<time::steady_clock::time_point> m_hardDeadline;
+  /**
+   * Set when the local routing protocol reports that it has absorbed the
+   * topology change for this prefix. Cleared implicitly on every insert, because
+   * a new mobility event constructs a new entry.
+   */
+  bool m_routeReady;
 };
 
 /**
@@ -64,9 +98,10 @@ public:
  */
 enum class TfibUseDecision
 {
-  NotFound,
-  Use,
-  Retired
+  NotFound,  ///< no entry covers the name
+  Use,       ///< entry is Active: forward on the TFIB face
+  Standby,   ///< entry is retained but idle: use the FIB and the strategy
+  Released   ///< entry was removed after routing confirmed the new location
 };
 
 /**
@@ -93,12 +128,33 @@ public:
   insert(const Name& prefix, face::Face& face, uint32_t seq, uint64_t floodId);
 
   /**
-   * @brief Updates expiry and stability state when a TFIB entry is used.
+   * @brief Advances the lifecycle of a TFIB entry on Interest arrival.
+   *
+   * @param prefix             key of the entry, as returned by findLongestPrefixMatch
+   * @param fibAgrees          the FIB already forwards this prefix on the TFIB face
+   * @param fibUsable          the FIB has any usable nexthop for this prefix
+   * @param idleTtl            expiry refresh applied while the entry is Active
+   * @param fibStableWindow    how long @p fibAgrees must hold before Standby
+   * @param standbyMaxLifetime upper bound armed when the entry first enters Standby
+   *
+   * Active stays Active until @p fibAgrees has held for @p fibStableWindow, then
+   * moves to Standby. Standby returns to Active whenever @p fibUsable is false, and
+   * is released once the routing protocol has reported readiness while the FIB is
+   * usable.
    */
   TfibUseDecision
-  onUse(const Name& prefix, bool fibAvailable, time::milliseconds idleTtl,
-        time::milliseconds fibStableWindow);
-  
+  onUse(const Name& prefix, bool fibAgrees, bool fibUsable,
+        time::milliseconds idleTtl, time::milliseconds fibStableWindow,
+        time::milliseconds standbyMaxLifetime);
+
+  /**
+   * @brief Records that the routing protocol has absorbed the topology change.
+   *
+   * @return true if an entry covering @p name was marked.
+   */
+  bool
+  markRouteReady(const Name& name);
+
   /**
    * @brief Erases all entries whose nexthop is the specified face.
    */
@@ -107,8 +163,12 @@ public:
   
   /**
    * @brief Removes all expired entries from the TFIB.
+   *
+   * @return prefixes of the removed entries. An entry reclaimed here was never
+   *         confirmed by the routing protocol, so reporting it separates release on
+   *         readiness from release on the standby bound.
    */
-  void
+  std::vector<Name>
   cleanup();
 
 private:

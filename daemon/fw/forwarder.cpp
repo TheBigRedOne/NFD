@@ -52,9 +52,24 @@ namespace {
 constexpr time::milliseconds TFIB_IDLE_TTL = 5000_ms;
 constexpr time::milliseconds TFIB_FIB_STABLE_WINDOW = 5000_ms;
 
+// Upper bound on how long a Standby TFIB entry is retained without the routing
+// protocol confirming that it has absorbed the topology change. It is a policy
+// parameter rather than an estimate of routing convergence time: it defines how
+// long an interruption is still treated as recoverable producer mobility, beyond
+// which the producer is considered to have left rather than moved. It also keeps
+// the mechanism usable without a cooperating routing protocol, in which case
+// entries are released on this bound alone.
+constexpr time::milliseconds TFIB_STANDBY_MAX_LIFETIME = 120000_ms;
+
 // Local command prefix by which the OptoFlood daemon arms business-Data mobility
 // marking: /localhost/nfd/optoflood/arm/<mobilePrefix...>.
 const Name OPTOFLOOD_ARM_PREFIX("/localhost/nfd/optoflood/arm");
+
+// Local signal prefix by which the routing protocol reports that its own view has
+// absorbed the topology change for a mobile prefix:
+// /localhost/nfd/optoflood/route-ready/<mobilePrefix...>. It authorises release of
+// the Standby TFIB entry; it does not by itself change forwarding.
+const Name OPTOFLOOD_ROUTE_READY_PREFIX("/localhost/nfd/optoflood/route-ready");
 
 // Reserved final name component of the OptoFlood guard sub-namespace:
 // guardPrefix = <mobilePrefix>/_guard. The OptoFlood daemon registers this
@@ -164,7 +179,9 @@ void
 Forwarder::scheduleTfibCleanup()
 {
   m_tfibCleanupEvent = getScheduler().schedule(TFIB_CLEANUP_INTERVAL, [this] {
-    m_tfib.cleanup();
+    for (const auto& prefix : m_tfib.cleanup()) {
+      NFD_LOG_DEBUG("OptoFlood tfib-retire prefix=" << prefix << " reason=expired");
+    }
     scheduleTfibCleanup();
   });
 }
@@ -250,6 +267,20 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
       OPTOFLOOD_ARM_PREFIX.isPrefixOf(interest.getName()) &&
       interest.getName().size() > OPTOFLOOD_ARM_PREFIX.size()) {
     this->armOptoFlood(interest.getName().getSubName(OPTOFLOOD_ARM_PREFIX.size()));
+    return;
+  }
+
+  // OptoFlood: intercept the local route-ready signal from the routing protocol.
+  // It marks the Standby TFIB entry covering <mobilePrefix> as releasable; a signal
+  // that arrives before the entry exists is discarded, because every mobility event
+  // constructs a new entry with the flag cleared.
+  if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL &&
+      OPTOFLOOD_ROUTE_READY_PREFIX.isPrefixOf(interest.getName()) &&
+      interest.getName().size() > OPTOFLOOD_ROUTE_READY_PREFIX.size()) {
+    Name mobilePrefix = interest.getName().getSubName(OPTOFLOOD_ROUTE_READY_PREFIX.size());
+    bool marked = m_tfib.markRouteReady(mobilePrefix);
+    NFD_LOG_DEBUG("OptoFlood route-ready prefix=" << mobilePrefix
+                  << " marked=" << marked);
     return;
   }
 
@@ -353,10 +384,13 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
 
   const fib::Entry& fibEntry = m_fib.findLongestPrefixMatch(*pitEntry);
 
-  // TFIB takes precedence
+  // TFIB takes precedence while the entry is Active. A Standby entry is retained
+  // only as a fallback, so it neither preempts the strategy nor triggers flooding.
   if (auto* tfibEntry = m_tfib.findLongestPrefixMatch(interest.getName())) {
     Face& tfibFace = tfibEntry->getFace();
-    if (tfibFace.getId() == ingress.face.getId()) {
+    const Name tfibPrefix = tfibEntry->getPrefix();
+    const bool wasActive = tfibEntry->getState() == table::TfibEntryState::Active;
+    if (wasActive && tfibFace.getId() == ingress.face.getId()) {
       if (!interest.getHopLimit()) {
         if (markInterestFlooded(interest)) {
           Interest floodInterest = interest;
@@ -381,18 +415,34 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
       }
     }
     const bool tfibIsP2p = tfibFace.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT;
-    const bool fibStableCandidate = tfibIsP2p ? fibEntry.hasNextHop(tfibFace) : fibHasP2pNextHop;
-    auto decision = m_tfib.onUse(tfibEntry->getPrefix(), fibStableCandidate, TFIB_IDLE_TTL,
-                                 TFIB_FIB_STABLE_WINDOW);
-    if (decision == table::TfibUseDecision::Retired) {
-      NFD_LOG_DEBUG("OptoFlood tfib-retire prefix=" << tfibEntry->getPrefix()
-                    << " reason=fib-stable");
-    }
-    else if (decision == table::TfibUseDecision::Use) {
-      NFD_LOG_DEBUG("OptoFlood tfib-forward interest=" << interest.getName()
-                    << " nonce=" << interest.getNonce());
-      onOutgoingInterest(interest, tfibEntry->getFace(), pitEntry);
-      return;
+    const bool fibAgrees = tfibIsP2p ? fibEntry.hasNextHop(tfibFace) : fibHasP2pNextHop;
+    // The fallback triggers only when the FIB cannot forward this prefix at all,
+    // which is what a routing-plane withdrawal looks like to the data plane.
+    const bool fibUsable = !fibEntry.getNextHops().empty();
+    auto decision = m_tfib.onUse(tfibPrefix, fibAgrees, fibUsable, TFIB_IDLE_TTL,
+                                 TFIB_FIB_STABLE_WINDOW, TFIB_STANDBY_MAX_LIFETIME);
+    switch (decision) {
+      case table::TfibUseDecision::Use:
+        if (!wasActive) {
+          NFD_LOG_DEBUG("OptoFlood tfib-fallback prefix=" << tfibPrefix
+                        << " reason=fib-unusable");
+        }
+        NFD_LOG_DEBUG("OptoFlood tfib-forward interest=" << interest.getName()
+                      << " nonce=" << interest.getNonce());
+        onOutgoingInterest(interest, tfibFace, pitEntry);
+        return;
+      case table::TfibUseDecision::Standby:
+        if (wasActive) {
+          NFD_LOG_DEBUG("OptoFlood tfib-standby prefix=" << tfibPrefix
+                        << " reason=fib-stable");
+        }
+        break;
+      case table::TfibUseDecision::Released:
+        NFD_LOG_DEBUG("OptoFlood tfib-retire prefix=" << tfibPrefix
+                      << " reason=route-ready");
+        break;
+      case table::TfibUseDecision::NotFound:
+        break;
     }
   }
 
