@@ -52,8 +52,8 @@ namespace {
 constexpr time::milliseconds TFIB_IDLE_TTL = 5000_ms;
 constexpr time::milliseconds TFIB_FIB_STABLE_WINDOW = 5000_ms;
 
-// Upper bound on how long a Standby TFIB entry is retained without the routing
-// protocol confirming that it has absorbed the topology change. It is a policy
+// Upper bound on how long a Standby TFIB entry is retained without a
+// new-path-calculated proof from the routing protocol. It is a policy
 // parameter rather than an estimate of routing convergence time: it defines how
 // long an interruption is still treated as recoverable producer mobility, beyond
 // which the producer is considered to have left rather than moved. It also keeps
@@ -65,17 +65,40 @@ constexpr time::milliseconds TFIB_STANDBY_MAX_LIFETIME = 120000_ms;
 // marking: /localhost/nfd/optoflood/arm/<mobilePrefix...>.
 const Name OPTOFLOOD_ARM_PREFIX("/localhost/nfd/optoflood/arm");
 
-// Local signal prefix by which the routing protocol reports that its own view has
-// absorbed the topology change for a mobile prefix:
-// /localhost/nfd/optoflood/route-ready/<mobilePrefix...>. It authorises release of
-// the Standby TFIB entry; it does not by itself change forwarding.
-const Name OPTOFLOOD_ROUTE_READY_PREFIX("/localhost/nfd/optoflood/route-ready");
+// Local freshness proof from NLSR after a post-new-path routing calculation:
+// /localhost/nfd/optoflood/new-path-calculated/<serial>/<mobilePrefix...>.
+// It may latch a proof on a Standby TFIB entry; it does not by itself change
+// forwarding. Release still requires forwarding agreement on a later Interest.
+const Name OPTOFLOOD_NEW_PATH_CALCULATED_PREFIX("/localhost/nfd/optoflood/new-path-calculated");
 
 // Reserved final name component of the OptoFlood guard sub-namespace:
 // guardPrefix = <mobilePrefix>/_guard. The OptoFlood daemon registers this
 // sub-namespace with the local forwarder, so guard Interests are demultiplexed to
 // the daemon instead of the baseline producer application.
 const ndn::name::Component OPTOFLOOD_GUARD_MARKER("_guard");
+
+/** \brief Whether ordinary BestRoute-style selection for a NEW Interest would
+ *         choose \p tfibFace as the first eligible nexthop.
+ *
+ *  FIB nexthops are cost-sorted. Eligibility matches BestRoute for a new Interest:
+ *  exclude the ingress face (unless ad-hoc) and scope violations. Equal-cost hops
+ *  keep FIB vector order, matching BestRoute. This is intentionally conservative:
+ *  false negatives keep TFIB longer; false positives that retire while BestRoute
+ *  still prefers another face are rejected.
+ */
+bool
+ordinaryForwardingPrefersFace(const fib::Entry& fibEntry, const Face& tfibFace,
+                              const Face& inFace, const Interest& interest,
+                              const shared_ptr<pit::Entry>& pitEntry)
+{
+  for (const auto& nexthop : fibEntry.getNextHops()) {
+    if (!fw::isNextHopEligible(inFace, interest, nexthop, pitEntry)) {
+      continue;
+    }
+    return nexthop.getFace().getId() == tfibFace.getId();
+  }
+  return false;
+}
 
 /** \brief Whether \p name is an OptoFlood guard name (<mobilePrefix>/_guard).
  *
@@ -270,17 +293,38 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
     return;
   }
 
-  // OptoFlood: intercept the local route-ready signal from the routing protocol.
-  // It marks the Standby TFIB entry covering <mobilePrefix> as releasable; a signal
-  // that arrives before the entry exists is discarded, because every mobility event
-  // constructs a new entry with the flag cleared.
+  // OptoFlood: intercept the local new-path-calculated proof from NLSR.
+  // /localhost/nfd/optoflood/new-path-calculated/<serial>/<mobilePrefix...>
+  // A proof that arrives before the entry exists is discarded. A serial that is
+  // not strictly newer than proofs observed before this TFIB generation is
+  // rejected as possibly stale.
   if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL &&
-      OPTOFLOOD_ROUTE_READY_PREFIX.isPrefixOf(interest.getName()) &&
-      interest.getName().size() > OPTOFLOOD_ROUTE_READY_PREFIX.size()) {
-    Name mobilePrefix = interest.getName().getSubName(OPTOFLOOD_ROUTE_READY_PREFIX.size());
-    bool marked = m_tfib.markRouteReady(mobilePrefix);
-    NFD_LOG_DEBUG("OptoFlood route-ready prefix=" << mobilePrefix
-                  << " marked=" << marked);
+      OPTOFLOOD_NEW_PATH_CALCULATED_PREFIX.isPrefixOf(interest.getName()) &&
+      interest.getName().size() > OPTOFLOOD_NEW_PATH_CALCULATED_PREFIX.size() + 1) {
+    const name::Component& serialComp =
+      interest.getName().at(OPTOFLOOD_NEW_PATH_CALCULATED_PREFIX.size());
+    if (!serialComp.isNumber()) {
+      NFD_LOG_DEBUG("OptoFlood new-path-calculated rejected reason=bad-serial-component");
+      return;
+    }
+    const uint64_t serial = serialComp.toNumber();
+    Name mobilePrefix = interest.getName().getSubName(
+      OPTOFLOOD_NEW_PATH_CALCULATED_PREFIX.size() + 1);
+    auto decision = m_tfib.acceptNewPathProof(mobilePrefix, serial);
+    switch (decision) {
+      case table::TfibProofDecision::Accepted:
+        NFD_LOG_DEBUG("OptoFlood new-path-calculated prefix=" << mobilePrefix
+                      << " serial=" << serial << " accepted");
+        break;
+      case table::TfibProofDecision::Rejected:
+        NFD_LOG_DEBUG("OptoFlood new-path-calculated prefix=" << mobilePrefix
+                      << " serial=" << serial << " rejected reason=stale-serial");
+        break;
+      case table::TfibProofDecision::NotFound:
+        NFD_LOG_DEBUG("OptoFlood new-path-calculated prefix=" << mobilePrefix
+                      << " serial=" << serial << " rejected reason=no-tfib-entry");
+        break;
+    }
     return;
   }
 
@@ -407,17 +451,14 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
         return;
       }
     }
-    bool fibHasP2pNextHop = false;
-    for (const auto& nh : fibEntry.getNextHops()) {
-      if (nh.getFace().getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
-        fibHasP2pNextHop = true;
-        break;
-      }
-    }
-    const bool tfibIsP2p = tfibFace.getLinkType() == ndn::nfd::LINK_TYPE_POINT_TO_POINT;
-    const bool fibAgrees = tfibIsP2p ? fibEntry.hasNextHop(tfibFace) : fibHasP2pNextHop;
+    // Ordinary forwarding agreement: the first BestRoute-eligible nexthop for this
+    // Interest must be the TFIB face. Presence of the TFIB face among several
+    // nexthops is not enough (BestRoute may still prefer a cheaper old face).
+    const bool fibAgrees = ordinaryForwardingPrefersFace(fibEntry, tfibFace, ingress.face,
+                                                         interest, pitEntry);
     // The fallback triggers only when the FIB cannot forward this prefix at all,
     // which is what a routing-plane withdrawal looks like to the data plane.
+    // Standby also returns to Active when preferred forwarding no longer agrees.
     const bool fibUsable = !fibEntry.getNextHops().empty();
     auto decision = m_tfib.onUse(tfibPrefix, fibAgrees, fibUsable, TFIB_IDLE_TTL,
                                  TFIB_FIB_STABLE_WINDOW, TFIB_STANDBY_MAX_LIFETIME);
@@ -425,7 +466,7 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
       case table::TfibUseDecision::Use:
         if (!wasActive) {
           NFD_LOG_DEBUG("OptoFlood tfib-fallback prefix=" << tfibPrefix
-                        << " reason=fib-unusable");
+                        << " reason=" << (!fibUsable ? "fib-unusable" : "fib-disagrees"));
         }
         NFD_LOG_DEBUG("OptoFlood tfib-forward interest=" << interest.getName()
                       << " nonce=" << interest.getNonce());
@@ -434,12 +475,12 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
       case table::TfibUseDecision::Standby:
         if (wasActive) {
           NFD_LOG_DEBUG("OptoFlood tfib-standby prefix=" << tfibPrefix
-                        << " reason=fib-stable");
+                        << " reason=fib-agrees");
         }
         break;
       case table::TfibUseDecision::Released:
         NFD_LOG_DEBUG("OptoFlood tfib-retire prefix=" << tfibPrefix
-                      << " reason=route-ready");
+                      << " reason=new-path-calculated+fib-agrees");
         break;
       case table::TfibUseDecision::NotFound:
         break;

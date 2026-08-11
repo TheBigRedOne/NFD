@@ -8,6 +8,7 @@
 #include <ndn-cxx/name.hpp>
 #include <ndn-cxx/util/time.hpp>
 
+#include <cstdint>
 #include <optional>
 #include <vector>
 #include <boost/multi_index_container.hpp>
@@ -26,9 +27,10 @@ namespace table {
  * @brief Lifecycle state of a TFIB entry.
  *
  * An Active entry is on the forwarding fast path and therefore bypasses the
- * forwarding strategy. Once the FIB can forward equivalently, the entry moves to
- * Standby: strategy control returns to the normal pipeline, but the entry is kept
- * as a fallback in case the routing plane later loses the prefix again.
+ * forwarding strategy. Once ordinary forwarding prefers the same face as the
+ * TFIB entry, the entry moves to Standby: strategy control returns to the normal
+ * pipeline, but the entry is kept as a fallback. The entry is released only after
+ * NLSR reports a post-new-path calculation proof while forwarding still agrees.
  */
 enum class TfibEntryState
 {
@@ -67,7 +69,10 @@ public:
   getState() const { return m_state; }
 
   bool
-  isRouteReady() const { return m_routeReady; }
+  hasNewPathProof() const { return m_newPathProofAccepted; }
+
+  uint64_t
+  getMinAcceptProofSerial() const { return m_minAcceptProofSerial; }
 
 public:
   // These members must be public for boost::multi_index::member
@@ -86,11 +91,15 @@ public:
    */
   std::optional<time::steady_clock::time_point> m_hardDeadline;
   /**
-   * Set when the local routing protocol reports that it has absorbed the
-   * topology change for this prefix. Cleared implicitly on every insert, because
-   * a new mobility event constructs a new entry.
+   * Set when a valid new-path-calculated proof is accepted for this entry.
+   * Cleared on every insert (new mobility generation).
    */
-  bool m_routeReady;
+  bool m_newPathProofAccepted;
+  /**
+   * Proof serials at or below this value are rejected as possibly stale relative
+   * to proofs observed before this entry was created.
+   */
+  uint64_t m_minAcceptProofSerial;
 };
 
 /**
@@ -101,7 +110,17 @@ enum class TfibUseDecision
   NotFound,  ///< no entry covers the name
   Use,       ///< entry is Active: forward on the TFIB face
   Standby,   ///< entry is retained but idle: use the FIB and the strategy
-  Released   ///< entry was removed after routing confirmed the new location
+  Released   ///< entry was removed after new-path proof + forwarding agreement
+};
+
+/**
+ * @brief Result of attempting to accept a new-path-calculated proof.
+ */
+enum class TfibProofDecision
+{
+  NotFound,   ///< no TFIB entry covers the name
+  Rejected,   ///< serial too old for this entry generation
+  Accepted    ///< proof latched on the matching entry
 };
 
 /**
@@ -117,12 +136,14 @@ public:
    */
   TfibEntry*
   findLongestPrefixMatch(const Name& name);
-  
+
   /**
    * @brief Inserts or updates a TFIB entry.
    *
    * If an entry for the same prefix exists, it is updated only if the
-   * newFaceSeq is greater than the existing one.
+   * newFaceSeq is greater than the existing one. A new generation clears any
+   * latched new-path proof and raises the minimum acceptable proof serial above
+   * proofs already observed on this forwarder.
    */
   void
   insert(const Name& prefix, face::Face& face, uint32_t seq, uint64_t floodId);
@@ -131,16 +152,16 @@ public:
    * @brief Advances the lifecycle of a TFIB entry on Interest arrival.
    *
    * @param prefix             key of the entry, as returned by findLongestPrefixMatch
-   * @param fibAgrees          the FIB already forwards this prefix on the TFIB face
+   * @param fibAgrees          ordinary forwarding currently prefers the TFIB face
    * @param fibUsable          the FIB has any usable nexthop for this prefix
    * @param idleTtl            expiry refresh applied while the entry is Active
    * @param fibStableWindow    how long @p fibAgrees must hold before Standby
    * @param standbyMaxLifetime upper bound armed when the entry first enters Standby
    *
    * Active stays Active until @p fibAgrees has held for @p fibStableWindow, then
-   * moves to Standby. Standby returns to Active whenever @p fibUsable is false, and
-   * is released once the routing protocol has reported readiness while the FIB is
-   * usable.
+   * moves to Standby. Standby returns to Active when @p fibUsable is false or
+   * @p fibAgrees is false, and is released once a new-path proof is latched while
+   * forwarding still agrees.
    */
   TfibUseDecision
   onUse(const Name& prefix, bool fibAgrees, bool fibUsable,
@@ -148,25 +169,32 @@ public:
         time::milliseconds standbyMaxLifetime);
 
   /**
-   * @brief Records that the routing protocol has absorbed the topology change.
+   * @brief Records a new-path-calculated proof from the local routing protocol.
    *
-   * @return true if an entry covering @p name was marked.
+   * @param name   mobile prefix carried in the localhost Interest
+   * @param serial monotonic calculation serial from NLSR
    */
-  bool
-  markRouteReady(const Name& name);
+  TfibProofDecision
+  acceptNewPathProof(const Name& name, uint64_t serial);
+
+  /**
+   * @brief Highest new-path-calculated serial observed by this forwarder.
+   */
+  uint64_t
+  getMaxObservedProofSerial() const { return m_maxObservedProofSerial; }
 
   /**
    * @brief Erases all entries whose nexthop is the specified face.
    */
   void
   erase(const face::Face& face);
-  
+
   /**
    * @brief Removes all expired entries from the TFIB.
    *
    * @return prefixes of the removed entries. An entry reclaimed here was never
-   *         confirmed by the routing protocol, so reporting it separates release on
-   *         readiness from release on the standby bound.
+   *         confirmed by a new-path proof, so reporting it separates release on
+   *         proof from release on the standby bound.
    */
   std::vector<Name>
   cleanup();
@@ -181,7 +209,6 @@ private:
       boost::multi_index::ordered_unique<
         boost::multi_index::tag<Prefix_>,
         boost::multi_index::member<TfibEntry, const Name, &TfibEntry::m_prefix>
-        // Default std::less<Name> is sufficient as ndn::Name is comparable
       >,
       boost::multi_index::ordered_non_unique<
         boost::multi_index::tag<Expiry_>,
@@ -191,6 +218,7 @@ private:
   >;
 
   Container m_table;
+  uint64_t m_maxObservedProofSerial = 0;
 };
 
 } // namespace table

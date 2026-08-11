@@ -21,7 +21,8 @@ TfibEntry::TfibEntry(const Name& prefix, Face& face,
   , m_fibAvailableSince(std::nullopt)
   , m_state(TfibEntryState::Active)
   , m_hardDeadline(std::nullopt)
-  , m_routeReady(false)
+  , m_newPathProofAccepted(false)
+  , m_minAcceptProofSerial(0)
 {
 }
 
@@ -52,16 +53,24 @@ Tfib::insert(const Name& prefix, Face& face, uint32_t seq, uint64_t floodId)
   auto& prefix_idx = m_table.get<Prefix_>();
   auto it = prefix_idx.find(prefix);
 
+  // Reject proofs that are not strictly newer than every serial already seen before
+  // this generation. A delayed announce whose serial equals maxObserved+1 can still
+  // race ahead of a newer mobility insert; without mobility-event identity that
+  // ambiguous latch is accepted as a residual risk (prefer keeping TFIB when unsure
+  // only when serial < minAccept).
+  const uint64_t minAccept = m_maxObservedProofSerial + 1;
+
   if (it != prefix_idx.end()) {
-    // Entry exists, check sequence number
     if (seq > (*it)->getNewFaceSeq()) {
-      // Update existing entry if new sequence is greater
-      prefix_idx.replace(it, std::make_shared<TfibEntry>(prefix, face, seq, floodId));
+      auto entry = std::make_shared<TfibEntry>(prefix, face, seq, floodId);
+      entry->m_minAcceptProofSerial = minAccept;
+      prefix_idx.replace(it, std::move(entry));
     }
   }
   else {
-    // Insert new entry
-    m_table.insert(std::make_shared<TfibEntry>(prefix, face, seq, floodId));
+    auto entry = std::make_shared<TfibEntry>(prefix, face, seq, floodId);
+    entry->m_minAcceptProofSerial = minAccept;
+    m_table.insert(std::move(entry));
   }
 }
 
@@ -121,9 +130,9 @@ Tfib::onUse(const Name& prefix, bool fibAgrees, bool fibUsable,
     return TfibUseDecision::Standby;
   }
 
-  // Standby: the FIB is expected to carry the traffic. Fall back only if it cannot,
-  // and release the entry once routing has confirmed the new location.
-  if (!fibUsable) {
+  // Standby: ordinary FIB is primary. Fall back when it cannot forward equivalently,
+  // and release only after a new-path proof while agreement still holds.
+  if (!fibUsable || !fibAgrees) {
     prefix_idx.modify(it, [&] (std::shared_ptr<TfibEntry>& entry) {
       entry->m_state = TfibEntryState::Active;
       entry->m_fibAvailableSince.reset();
@@ -133,7 +142,7 @@ Tfib::onUse(const Name& prefix, bool fibAgrees, bool fibUsable,
     return TfibUseDecision::Use;
   }
 
-  if ((*it)->m_routeReady) {
+  if ((*it)->m_newPathProofAccepted) {
     prefix_idx.erase(it);
     return TfibUseDecision::Released;
   }
@@ -141,15 +150,24 @@ Tfib::onUse(const Name& prefix, bool fibAgrees, bool fibUsable,
   return TfibUseDecision::Standby;
 }
 
-bool
-Tfib::markRouteReady(const Name& name)
+TfibProofDecision
+Tfib::acceptNewPathProof(const Name& name, uint64_t serial)
 {
+  if (serial > m_maxObservedProofSerial) {
+    m_maxObservedProofSerial = serial;
+  }
+
   auto* entry = findLongestPrefixMatch(name);
   if (entry == nullptr) {
-    return false;
+    return TfibProofDecision::NotFound;
   }
-  entry->m_routeReady = true;
-  return true;
+
+  if (serial < entry->m_minAcceptProofSerial) {
+    return TfibProofDecision::Rejected;
+  }
+
+  entry->m_newPathProofAccepted = true;
+  return TfibProofDecision::Accepted;
 }
 
 void
