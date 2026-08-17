@@ -300,15 +300,6 @@ private:
   void
   armOptoFlood(const Name& mobilePrefix);
 
-  /** \brief Record a qualified downstream face as service-relevant for \p prefix.
-   *
-   *  Observation only. Does not affect forwarding. Native HopLimit is not a filter.
-   */
-  void
-  observeServiceBranch(const Name& prefix, const Face& face,
-                       face::FaceId excludeFaceId1 = face::INVALID_FACEID,
-                       face::FaceId excludeFaceId2 = face::INVALID_FACEID);
-
   /** \brief Collect qualified PIT in-record faces while a TFIB entry still covers \p data.
    *
    *  Must be called before in-records are cleared or destroyed. No-op for guard Data
@@ -319,6 +310,15 @@ private:
                                const pit::DataMatchResult& pitMatches);
 
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
+  /** \brief Record a qualified downstream face as service-relevant for \p prefix.
+   *
+   *  Observation only. Does not affect forwarding. Native HopLimit is not a filter.
+   */
+  void
+  observeServiceBranch(const Name& prefix, const Face& face,
+                       face::FaceId excludeFaceId1 = face::INVALID_FACEID,
+                       face::FaceId excludeFaceId2 = face::INVALID_FACEID);
+
   /**
    * \brief Configuration options from the `forwarder` section.
    */
