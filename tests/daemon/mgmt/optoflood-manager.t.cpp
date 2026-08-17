@@ -141,6 +141,7 @@ BOOST_AUTO_TEST_CASE(PrefixEraseReflectedInDataset)
 {
   auto face = addNonLocalFace();
   m_forwarder.observeServiceBranch("/LiveStream", *face);
+  advanceClocks(1_ms);
   m_forwarder.getServiceBranchTable().erase("/LiveStream");
 
   auto entries = queryServiceBranches("/localhost/nfd/optoflood/service-branches/LiveStream");
