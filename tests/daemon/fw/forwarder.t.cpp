@@ -1404,7 +1404,10 @@ BOOST_AUTO_TEST_CASE(NextHopFaceIdDoesNotEnterAsMembership)
   consumer->receiveInterest(*interest);
   this->advanceClocks(1_ms);
 
-  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+  BOOST_REQUIRE_EQUAL(other->sentInterests.size(), 1);
+  BOOST_CHECK_EQUAL(other->sentInterests.back().getName(), Name("/A/content"));
+
+  BOOST_CHECK(!hasBranch(forwarder, "/A", consumer->getId()));
   BOOST_CHECK(!hasBranch(forwarder, "/A", other->getId()));
   BOOST_CHECK(!hasBranch(forwarder, "/A", producer->getId()));
 }
