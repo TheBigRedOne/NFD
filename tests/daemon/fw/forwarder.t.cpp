@@ -39,6 +39,13 @@ namespace nfd::tests {
 
 class ForwarderFixture : public GlobalIoTimeFixture
 {
+public:
+  Forwarder&
+  getForwarder()
+  {
+    return forwarder;
+  }
+
 protected:
   template<typename ...Args>
   shared_ptr<DummyFace>
@@ -1023,7 +1030,7 @@ void
 installTfib(ForwarderFixture& fixture, DummyFace& producer, const Name& prefix,
             uint32_t seq, uint64_t floodId)
 {
-  Fib& fib = fixture.forwarder.getFib();
+  Fib& fib = fixture.getForwarder().getFib();
   fib::Entry* entry = fib.insert(prefix).first;
   fib.addOrUpdateNextHop(*entry, producer, 0);
   producer.receiveData(*makeTfibData(prefix, seq, floodId));
