@@ -190,6 +190,7 @@ Forwarder::Forwarder(FaceTable& faceTable)
 
   m_faceTable.beforeRemove.connect([this] (const Face& face) {
     cleanupOnFaceRemoval(m_nameTree, m_fib, m_pit, face);
+    m_serviceBranches.eraseFace(face.getId());
   });
 
   m_fib.afterNewNextHop.connect([this] (const Name& prefix, const fib::NextHop& nextHop) {
@@ -204,6 +205,7 @@ Forwarder::scheduleTfibCleanup()
   m_tfibCleanupEvent = getScheduler().schedule(TFIB_CLEANUP_INTERVAL, [this] {
     for (const auto& prefix : m_tfib.cleanup()) {
       NFD_LOG_DEBUG("OptoFlood tfib-retire prefix=" << prefix << " reason=expired");
+      m_serviceBranches.erase(prefix);
     }
     scheduleTfibCleanup();
   });
@@ -470,6 +472,9 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
         }
         NFD_LOG_DEBUG("OptoFlood tfib-forward interest=" << interest.getName()
                       << " nonce=" << interest.getNonce());
+        if (!isOptoFloodGuardName(interest.getName())) {
+          observeServiceBranch(tfibPrefix, ingress.face, tfibFace.getId());
+        }
         onOutgoingInterest(interest, tfibFace, pitEntry);
         return;
       case table::TfibUseDecision::Standby:
@@ -481,6 +486,7 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
       case table::TfibUseDecision::Released:
         NFD_LOG_DEBUG("OptoFlood tfib-retire prefix=" << tfibPrefix
                       << " reason=new-path-calculated+fib-agrees");
+        m_serviceBranches.erase(tfibPrefix);
         break;
       case table::TfibUseDecision::NotFound:
         break;
@@ -658,6 +664,9 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
   // CS insert
   m_cs.insert(data);
+
+  // Service-branch observation must run while in-records still exist.
+  observeServiceBranchesOnData(data, ingress.face, pitMatches);
 
   // when only one PIT entry is matched, trigger strategy: after receive Data
   if (pitMatches.size() == 1) {
@@ -973,6 +982,49 @@ Forwarder::processConfig(const ConfigSection& configSection, bool isDryRun, cons
 
   if (!isDryRun) {
     m_config = config;
+  }
+}
+
+void
+Forwarder::observeServiceBranch(const Name& prefix, const Face& face,
+                                face::FaceId excludeFaceId1, face::FaceId excludeFaceId2)
+{
+  if (face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+    return;
+  }
+  if (face.getLinkType() != ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
+    return;
+  }
+  const face::FaceId id = face.getId();
+  if (id == excludeFaceId1 || id == excludeFaceId2) {
+    return;
+  }
+  m_serviceBranches.add(prefix, id);
+}
+
+void
+Forwarder::observeServiceBranchesOnData(const Data& data, const Face& dataIngress,
+                                        const pit::DataMatchResult& pitMatches)
+{
+  if (isOptoFloodGuardName(data.getName())) {
+    return;
+  }
+  auto* tfibEntry = m_tfib.findLongestPrefixMatch(data.getName());
+  if (tfibEntry == nullptr) {
+    return;
+  }
+
+  const Name& prefix = tfibEntry->getPrefix();
+  const face::FaceId tfibFaceId = tfibEntry->getFace().getId();
+  const face::FaceId dataIngressId = dataIngress.getId();
+
+  for (const auto& pitEntry : pitMatches) {
+    if (isOptoFloodGuardName(pitEntry->getName())) {
+      continue;
+    }
+    for (const pit::InRecord& inRecord : pitEntry->getInRecords()) {
+      observeServiceBranch(prefix, inRecord.getFace(), tfibFaceId, dataIngressId);
+    }
   }
 }
 

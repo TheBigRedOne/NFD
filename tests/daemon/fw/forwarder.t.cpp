@@ -33,6 +33,7 @@
 #include "dummy-strategy.hpp"
 
 #include <ndn-cxx/lp/tags.hpp>
+#include <ndn-cxx/optoflood.hpp>
 
 namespace nfd::tests {
 
@@ -997,6 +998,339 @@ BOOST_AUTO_TEST_CASE(BadDefaultHopLimit)
 }
 
 BOOST_AUTO_TEST_SUITE_END() // ProcessConfig
+
+namespace {
+
+bool
+hasBranch(Forwarder& forwarder, const Name& prefix, face::FaceId faceId)
+{
+  const auto* set = forwarder.getServiceBranchTable().find(prefix);
+  return set != nullptr && set->count(faceId) > 0;
+}
+
+shared_ptr<Data>
+makeTfibData(const Name& prefix, uint32_t seq, uint64_t floodId)
+{
+  auto data = makeData(Name(prefix).append("tfib").appendNumber(seq));
+  ndn::MetaInfo mi;
+  mi.addAppMetaInfo(ndn::optoflood::makeFloodIdBlock(floodId));
+  mi.addAppMetaInfo(ndn::optoflood::makeNewFaceSeqBlock(seq));
+  data->setMetaInfo(mi);
+  return data;
+}
+
+void
+installTfib(ForwarderFixture& fixture, DummyFace& producer, const Name& prefix,
+            uint32_t seq, uint64_t floodId)
+{
+  Fib& fib = fixture.forwarder.getFib();
+  fib::Entry* entry = fib.insert(prefix).first;
+  fib.addOrUpdateNextHop(*entry, producer, 0);
+  producer.receiveData(*makeTfibData(prefix, seq, floodId));
+  fixture.advanceClocks(1_ms);
+}
+
+void
+clearSent(DummyFace& face)
+{
+  face.sentInterests.clear();
+  face.sentData.clear();
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_SUITE(ServiceBranch)
+
+BOOST_AUTO_TEST_CASE(SingleConsumerTfibUse)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 11);
+  clearSent(*producer);
+  clearSent(*consumer);
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+  BOOST_CHECK(!hasBranch(forwarder, "/A", producer->getId()));
+  BOOST_REQUIRE_EQUAL(producer->sentInterests.size(), 1);
+  BOOST_CHECK_EQUAL(producer->sentInterests.back().getName(), "/A/content");
+}
+
+BOOST_AUTO_TEST_CASE(NativeHopLimitStillEntersSet)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 12);
+  clearSent(*producer);
+
+  auto interest = makeInterest("/A/content", false, 4_s);
+  interest->setHopLimit(8);
+  consumer->receiveInterest(*interest);
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+  BOOST_REQUIRE_EQUAL(producer->sentInterests.size(), 1);
+}
+
+BOOST_AUTO_TEST_CASE(TwoDownstreamFaces)
+{
+  auto producer = addFace();
+  auto consumer1 = addFace();
+  auto consumer2 = addFace();
+  installTfib(*this, *producer, "/A", 1, 13);
+
+  consumer1->receiveInterest(*makeInterest("/A/c1", false, 4_s));
+  consumer2->receiveInterest(*makeInterest("/A/c2", false, 4_s));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer1->getId()));
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer2->getId()));
+}
+
+BOOST_AUTO_TEST_CASE(PitAggregation)
+{
+  auto producer = addFace();
+  auto consumer1 = addFace();
+  auto consumer2 = addFace();
+  installTfib(*this, *producer, "/A", 1, 14);
+  clearSent(*producer);
+  clearSent(*consumer1);
+  clearSent(*consumer2);
+
+  consumer1->receiveInterest(*makeInterest("/A/shared", false, 4_s, 1));
+  consumer2->receiveInterest(*makeInterest("/A/shared", false, 4_s, 2));
+  this->advanceClocks(1_ms);
+
+  producer->receiveData(*makeData("/A/shared"));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer1->getId()));
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer2->getId()));
+  BOOST_CHECK(!hasBranch(forwarder, "/A", producer->getId()));
+  BOOST_REQUIRE_EQUAL(consumer1->sentData.size(), 1);
+  BOOST_REQUIRE_EQUAL(consumer2->sentData.size(), 1);
+}
+
+BOOST_AUTO_TEST_CASE(GuardExcluded)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 15);
+
+  consumer->receiveInterest(*makeInterest("/A/_guard", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(!hasBranch(forwarder, "/A", consumer->getId()));
+
+  consumer->receiveInterest(*makeInterest("/A/_guard", false, 4_s, 9));
+  this->advanceClocks(1_ms);
+  producer->receiveData(*makeData("/A/_guard"));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(!hasBranch(forwarder, "/A", consumer->getId()));
+}
+
+BOOST_AUTO_TEST_CASE(LocalFaceExcluded)
+{
+  auto producer = addFace();
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  installTfib(*this, *producer, "/A", 1, 16);
+
+  local->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(!hasBranch(forwarder, "/A", local->getId()));
+}
+
+BOOST_AUTO_TEST_CASE(NonP2PExcluded)
+{
+  auto producer = addFace();
+  auto multi = addFace("dummy://", "dummy://",
+                       ndn::nfd::FACE_SCOPE_NON_LOCAL,
+                       ndn::nfd::FACE_PERSISTENCY_PERSISTENT,
+                       ndn::nfd::LINK_TYPE_MULTI_ACCESS);
+  installTfib(*this, *producer, "/A", 1, 17);
+
+  multi->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(!hasBranch(forwarder, "/A", multi->getId()));
+}
+
+BOOST_AUTO_TEST_CASE(TfibUpstreamExcluded)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 18);
+  consumer->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+
+  producer->receiveInterest(*makeInterest("/A/from-upstream", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(!hasBranch(forwarder, "/A", producer->getId()));
+}
+
+BOOST_AUTO_TEST_CASE(DataIngressExcluded)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 19);
+  clearSent(*consumer);
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+  producer->receiveData(*makeData("/A/content"));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+  BOOST_CHECK(!hasBranch(forwarder, "/A", producer->getId()));
+}
+
+BOOST_AUTO_TEST_CASE(StandbyRetainsAndDataSideAdds)
+{
+  auto producer = addFace();
+  auto consumer1 = addFace();
+  auto consumer2 = addFace();
+  installTfib(*this, *producer, "/A", 1, 20);
+
+  consumer1->receiveInterest(*makeInterest("/A/shared", false, 30_s, 1));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer1->getId()));
+
+  this->advanceClocks(100_ms, 4900_ms);
+  consumer1->receiveInterest(*makeInterest("/A/shared", false, 30_s, 3));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer1->getId()));
+
+  this->advanceClocks(100_ms, 300_ms);
+  consumer2->receiveInterest(*makeInterest("/A/shared", false, 30_s, 2));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer1->getId()));
+
+  producer->receiveData(*makeData("/A/shared"));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer1->getId()));
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer2->getId()));
+}
+
+BOOST_AUTO_TEST_CASE(TfibReplaceRetainsSet)
+{
+  auto producer1 = addFace();
+  auto producer2 = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer1, "/A", 1, 21);
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *producer2, 0);
+  producer2->receiveData(*makeTfibData("/A", 2, 22));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+}
+
+BOOST_AUTO_TEST_CASE(TfibReleaseClearsSet)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  installTfib(*this, *producer, "/A", 1, 23);
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 30_s, 1));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+
+  this->advanceClocks(100_ms, 4900_ms);
+  consumer->receiveInterest(*makeInterest("/A/content", false, 30_s, 3));
+  this->advanceClocks(1_ms);
+  this->advanceClocks(100_ms, 300_ms);
+  consumer->receiveInterest(*makeInterest("/A/content", false, 30_s, 4));
+  this->advanceClocks(1_ms);
+
+  Name proof("/localhost/nfd/optoflood/new-path-calculated");
+  proof.appendNumber(1);
+  proof.append(Name("/A"));
+  local->receiveInterest(*makeInterest(proof));
+  this->advanceClocks(1_ms);
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 30_s, 5));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(forwarder.getServiceBranchTable().find("/A") == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(TfibExpiryClearsSet)
+{
+  auto producer = addFace();
+  auto fibFace = addFace();
+  auto consumer = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *fibFace, 0);
+  producer->receiveData(*makeTfibData("/A", 1, 24));
+  this->advanceClocks(1_ms);
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+
+  this->advanceClocks(100_ms, 6_s);
+  BOOST_CHECK(forwarder.getServiceBranchTable().find("/A") == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(FaceRemovalRemovesOnlyThatFace)
+{
+  auto producer = addFace();
+  auto consumer1 = addFace();
+  auto consumer2 = addFace();
+  installTfib(*this, *producer, "/A", 1, 25);
+
+  consumer1->receiveInterest(*makeInterest("/A/c1", false, 4_s));
+  consumer2->receiveInterest(*makeInterest("/A/c2", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer1->getId()));
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer2->getId()));
+
+  const face::FaceId removed = consumer1->getId();
+  const face::FaceId kept = consumer2->getId();
+  consumer1->close();
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(!hasBranch(forwarder, "/A", removed));
+  BOOST_CHECK(hasBranch(forwarder, "/A", kept));
+}
+
+BOOST_AUTO_TEST_CASE(ForwardingUnchanged)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  auto other = addFace();
+  installTfib(*this, *producer, "/A", 1, 26);
+  clearSent(*producer);
+  clearSent(*consumer);
+  clearSent(*other);
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_REQUIRE_EQUAL(producer->sentInterests.size(), 1);
+  BOOST_CHECK_EQUAL(producer->sentInterests.back().getName(), "/A/content");
+  BOOST_CHECK_EQUAL(other->sentInterests.size(), 0);
+  BOOST_CHECK_EQUAL(consumer->sentInterests.size(), 0);
+
+  producer->receiveData(*makeData("/A/content"));
+  this->advanceClocks(1_ms);
+  BOOST_REQUIRE_EQUAL(consumer->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(consumer->sentData.back().getName(), "/A/content");
+  BOOST_CHECK_EQUAL(other->sentData.size(), 0);
+  BOOST_CHECK_EQUAL(producer->sentData.size(), 0);
+}
+
+BOOST_AUTO_TEST_SUITE_END() // ServiceBranch
 
 BOOST_AUTO_TEST_SUITE_END() // TestForwarder
 BOOST_AUTO_TEST_SUITE_END() // Fw

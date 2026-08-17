@@ -39,6 +39,7 @@
 #include "table/dead-nonce-list.hpp"
 #include "table/network-region-table.hpp"
 #include "table/tfib.hpp"
+#include "table/service-branch.hpp"
 
 #include <unordered_set>
 
@@ -143,6 +144,12 @@ public:
   getNetworkRegionTable() noexcept
   {
     return m_networkRegionTable;
+  }
+
+  table::ServiceBranchTable&
+  getServiceBranchTable() noexcept
+  {
+    return m_serviceBranches;
   }
 
   /** \brief Register handler for forwarder section of NFD configuration file.
@@ -286,6 +293,24 @@ private:
   void
   armOptoFlood(const Name& mobilePrefix);
 
+  /** \brief Record a qualified downstream face as service-relevant for \p prefix.
+   *
+   *  Observation only. Does not affect forwarding. Native HopLimit is not a filter.
+   */
+  void
+  observeServiceBranch(const Name& prefix, const Face& face,
+                       face::FaceId excludeFaceId1 = face::INVALID_FACEID,
+                       face::FaceId excludeFaceId2 = face::INVALID_FACEID);
+
+  /** \brief Collect qualified PIT in-record faces while a TFIB entry still covers \p data.
+   *
+   *  Must be called before in-records are cleared or destroyed. No-op for guard Data
+   *  or when no TFIB entry covers the Data name.
+   */
+  void
+  observeServiceBranchesOnData(const Data& data, const Face& dataIngress,
+                               const pit::DataMatchResult& pitMatches);
+
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
    * \brief Configuration options from the `forwarder` section.
@@ -315,6 +340,7 @@ private:
 
   // OptoFlood members
   table::Tfib m_tfib;
+  table::ServiceBranchTable m_serviceBranches;
   ndn::scheduler::ScopedEventId m_tfibCleanupEvent;
 
   // OptoFlood business-Data mobility-marking arm state (keyed by mobile prefix).
