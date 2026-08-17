@@ -46,6 +46,7 @@
 #include <ndn-cxx/lp/tags.hpp>
 #include <ndn-cxx/name.hpp>
 #include <ndn-cxx/util/scheduler.hpp>
+#include <ndn-cxx/util/signal.hpp>
 #include <ndn-cxx/util/time.hpp>
 #include <map>
 #include <optional>
@@ -151,6 +152,12 @@ public:
   {
     return m_serviceBranches;
   }
+
+  /** \brief Emitted after a ServiceBranch prefix/FaceId pair is inserted for the first time.
+   *
+   *  Duplicate add of an existing FaceId does not emit. Erase is not signaled.
+   */
+  signal::Signal<Forwarder, Name, face::FaceId> afterServiceBranchAdded;
 
   /** \brief Register handler for forwarder section of NFD configuration file.
    */

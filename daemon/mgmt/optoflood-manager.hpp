@@ -23,69 +23,45 @@
  * NFD, e.g., in COPYING.md file.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef NFD_DAEMON_TABLE_SERVICE_BRANCH_HPP
-#define NFD_DAEMON_TABLE_SERVICE_BRANCH_HPP
+#ifndef NFD_DAEMON_MGMT_OPTOFLOOD_MANAGER_HPP
+#define NFD_DAEMON_MGMT_OPTOFLOOD_MANAGER_HPP
 
-#include "core/common.hpp"
-#include "face/face-common.hpp"
+#include "manager-base.hpp"
+#include "fw/forwarder.hpp"
 
-#include <map>
 #include <set>
 
-namespace nfd::table {
+namespace nfd {
 
 /**
- * \brief Downstream faces that have carried business traffic for a TFIB prefix.
+ * \brief Localhost management of OptoFlood ServiceBranch observation state.
  *
- * Observation only: the table does not affect forwarding. The prefix key is the
- * same routable prefix used by TFIB. A TFIB insert/replace must not clear the
- * set; only TFIB removal or an explicit erase does.
+ * Encoding reuses ndn::nfd::FibEntry as transport only; this manager does not
+ * read or write the FIB.
  */
-class ServiceBranchTable
+class OptoFloodManager final : public ManagerBase
 {
 public:
-  void
-  add(const Name& prefix, face::FaceId faceId);
-
-  /** \return the FaceId set for \p prefix, or nullptr if the prefix is absent.
-   */
-  const std::set<face::FaceId>*
-  find(const Name& prefix) const;
-
-  void
-  erase(const Name& prefix);
-
-  /** \brief Remove \p faceId from every prefix set.
-   *
-   *  Prefixes whose set becomes empty are erased.
-   */
-  void
-  eraseFace(face::FaceId faceId);
-
-  using const_iterator = std::map<Name, std::set<face::FaceId>>::const_iterator;
-
-  const_iterator
-  begin() const
-  {
-    return m_table.begin();
-  }
-
-  const_iterator
-  end() const
-  {
-    return m_table.end();
-  }
-
-  bool
-  empty() const
-  {
-    return m_table.empty();
-  }
+  OptoFloodManager(Forwarder& forwarder, Dispatcher& dispatcher);
 
 private:
-  std::map<Name, std::set<face::FaceId>> m_table;
+  void
+  listServiceBranches(const Name& prefix, const Interest& interest,
+                      ndn::mgmt::StatusDatasetContext& context);
+
+  void
+  appendBranch(const Name& prefix, const std::set<face::FaceId>& faces,
+               ndn::mgmt::StatusDatasetContext& context);
+
+  void
+  notifyServiceBranchAdded(const Name& prefix, face::FaceId faceId);
+
+private:
+  Forwarder& m_forwarder;
+  ndn::mgmt::PostNotification m_postNotification;
+  signal::ScopedConnection m_afterServiceBranchAdded;
 };
 
-} // namespace nfd::table
+} // namespace nfd
 
-#endif // NFD_DAEMON_TABLE_SERVICE_BRANCH_HPP
+#endif // NFD_DAEMON_MGMT_OPTOFLOOD_MANAGER_HPP

@@ -38,6 +38,7 @@
 #include "mgmt/forwarder-status-manager.hpp"
 #include "mgmt/general-config-section.hpp"
 #include "mgmt/log-config-section.hpp"
+#include "mgmt/optoflood-manager.hpp"
 #include "mgmt/strategy-choice-manager.hpp"
 #include "mgmt/tables-config-section.hpp"
 
@@ -146,6 +147,7 @@ Nfd::initializeManagement()
                                        *m_dispatcher, *m_authenticator);
   m_strategyChoiceManager = make_unique<StrategyChoiceManager>(m_forwarder->getStrategyChoice(),
                                                                *m_dispatcher, *m_authenticator);
+  m_optoFloodManager = make_unique<OptoFloodManager>(*m_forwarder, *m_dispatcher);
 
   ConfigFile config(&ignoreRibAndLogSections);
   general::setConfigFile(config);

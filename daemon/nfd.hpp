@@ -45,6 +45,7 @@ class FaceManager;
 class FibManager;
 class CsManager;
 class StrategyChoiceManager;
+class OptoFloodManager;
 
 namespace face {
 class Face;
@@ -125,6 +126,7 @@ private:
   unique_ptr<FibManager> m_fibManager;
   unique_ptr<CsManager> m_csManager;
   unique_ptr<StrategyChoiceManager> m_strategyChoiceManager;
+  unique_ptr<OptoFloodManager> m_optoFloodManager;
 
   shared_ptr<ndn::net::NetworkMonitor> m_netmon;
   ndn::scheduler::ScopedEventId m_reloadConfigEvent;

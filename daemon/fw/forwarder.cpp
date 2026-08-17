@@ -999,7 +999,12 @@ Forwarder::observeServiceBranch(const Name& prefix, const Face& face,
   if (id == excludeFaceId1 || id == excludeFaceId2) {
     return;
   }
+  const auto* existing = m_serviceBranches.find(prefix);
+  const bool isNew = existing == nullptr || existing->count(id) == 0;
   m_serviceBranches.add(prefix, id);
+  if (isNew) {
+    afterServiceBranchAdded(prefix, id);
+  }
 }
 
 void

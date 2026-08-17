@@ -108,6 +108,21 @@ BOOST_AUTO_TEST_CASE(FindMissingPrefix)
   BOOST_CHECK(table.find("/A") == nullptr);
 }
 
+BOOST_AUTO_TEST_CASE(ConstIteration)
+{
+  table::ServiceBranchTable table;
+  BOOST_CHECK(table.empty());
+  table.add("/A", 1);
+  table.add("/B", 2);
+  size_t n = 0;
+  for (const auto& [prefix, faces] : table) {
+    ++n;
+    BOOST_CHECK(!faces.empty());
+    BOOST_CHECK(prefix == Name("/A") || prefix == Name("/B"));
+  }
+  BOOST_CHECK_EQUAL(n, 2);
+}
+
 BOOST_AUTO_TEST_SUITE_END() // TestServiceBranch
 BOOST_AUTO_TEST_SUITE_END() // Table
 

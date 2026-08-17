@@ -1337,6 +1337,118 @@ BOOST_AUTO_TEST_CASE(ForwardingUnchanged)
   BOOST_CHECK_EQUAL(producer->sentData.size(), 0);
 }
 
+BOOST_AUTO_TEST_CASE(FirstInsertEmitsSignal)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 27);
+
+  size_t n = 0;
+  Name signaledPrefix;
+  face::FaceId signaledFace = face::INVALID_FACEID;
+  forwarder.afterServiceBranchAdded.connect([&] (const Name& prefix, face::FaceId faceId) {
+    ++n;
+    signaledPrefix = prefix;
+    signaledFace = faceId;
+  });
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(n, 1);
+  BOOST_CHECK_EQUAL(signaledPrefix, Name("/A"));
+  BOOST_CHECK_EQUAL(signaledFace, consumer->getId());
+}
+
+BOOST_AUTO_TEST_CASE(DuplicateInsertDoesNotEmit)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 28);
+
+  size_t n = 0;
+  forwarder.afterServiceBranchAdded.connect([&] (const Name&, face::FaceId) { ++n; });
+
+  consumer->receiveInterest(*makeInterest("/A/c1", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK_EQUAL(n, 1);
+
+  consumer->receiveInterest(*makeInterest("/A/c2", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK_EQUAL(n, 1);
+}
+
+BOOST_AUTO_TEST_CASE(ExcludedInterestDoesNotEmit)
+{
+  auto producer = addFace();
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  installTfib(*this, *producer, "/A", 1, 29);
+
+  size_t n = 0;
+  forwarder.afterServiceBranchAdded.connect([&] (const Name&, face::FaceId) { ++n; });
+
+  local->receiveInterest(*makeInterest("/A/content", false, 4_s));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK_EQUAL(n, 0);
+}
+
+BOOST_AUTO_TEST_CASE(NextHopFaceIdDoesNotEnterAsMembership)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  auto other = addFace();
+  installTfib(*this, *producer, "/A", 1, 30);
+
+  auto interest = makeInterest("/A/content", false, 4_s);
+  interest->setTag(make_shared<lp::NextHopFaceIdTag>(other->getId()));
+  consumer->receiveInterest(*interest);
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+  BOOST_CHECK(!hasBranch(forwarder, "/A", other->getId()));
+  BOOST_CHECK(!hasBranch(forwarder, "/A", producer->getId()));
+}
+
+BOOST_AUTO_TEST_CASE(StaleCsDoesNotBlockLateNextHopFaceId)
+{
+  auto nlsr = addFace();
+  auto faceA = addFace();
+  auto faceB = addFace();
+  const Name av("/localhop/ndn/nlsr/optoflood/corridor/ADJACENCY/X");
+
+  auto express = [&] (face::FaceId nh) {
+    auto interest = makeInterest(av, false, 1_s);
+    interest->setMustBeFresh(true);
+    interest->setTag(make_shared<lp::NextHopFaceIdTag>(nh));
+    nlsr->receiveInterest(*interest);
+    this->advanceClocks(1_ms);
+  };
+
+  express(faceA->getId());
+  BOOST_REQUIRE_EQUAL(faceA->sentInterests.size(), 1);
+  BOOST_CHECK(faceA->sentInterests.back().getMustBeFresh());
+  BOOST_CHECK(!faceA->sentInterests.back().getCanBePrefix());
+
+  auto data = makeData(av);
+  data->setFreshnessPeriod(0_ms);
+  signData(*data);
+  faceA->receiveData(*data);
+  this->advanceClocks(1_ms);
+
+  express(faceB->getId());
+  BOOST_REQUIRE_EQUAL(faceB->sentInterests.size(), 1);
+  BOOST_CHECK_EQUAL(faceB->sentInterests.back().getName(), av);
+  BOOST_CHECK(faceB->sentInterests.back().getMustBeFresh());
+  BOOST_CHECK(!faceB->sentInterests.back().getCanBePrefix());
+
+  auto faceC = addFace();
+  auto faceD = addFace();
+  express(faceC->getId());
+  express(faceD->getId());
+  BOOST_CHECK_EQUAL(faceC->sentInterests.size(), 1);
+  BOOST_CHECK_EQUAL(faceD->sentInterests.size(), 1);
+}
+
 BOOST_AUTO_TEST_SUITE_END() // ServiceBranch
 
 BOOST_AUTO_TEST_SUITE_END() // TestForwarder
