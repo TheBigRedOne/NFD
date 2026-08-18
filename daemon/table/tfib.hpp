@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <ostream>
 #include <vector>
 #include <boost/multi_index_container.hpp>
 #include <boost/multi_index/ordered_index.hpp>
@@ -23,14 +24,24 @@ class Face; // Correct forward declaration in the correct namespace
 
 namespace table {
 
+/** Initial idle expiry for a newly created Active generation. */
+inline constexpr time::milliseconds TFIB_ENTRY_LIFETIME = time::milliseconds(5000);
+
+/**
+ * Absolute generation lifetime from insert. Not configurable.
+ * Armed on every new TfibEntry; same-sequence insert does not refresh it.
+ */
+inline constexpr time::milliseconds TFIB_STANDBY_MAX_LIFETIME = time::milliseconds(120000);
+
 /**
  * @brief Lifecycle state of a TFIB entry.
  *
  * An Active entry is on the forwarding fast path and therefore bypasses the
- * forwarding strategy. Once ordinary forwarding prefers the same face as the
- * TFIB entry, the entry moves to Standby: strategy control returns to the normal
- * pipeline, but the entry is kept as a fallback. The entry is released only after
- * NLSR reports a post-new-path calculation proof while forwarding still agrees.
+ * forwarding strategy. Once the exact ordinary FIB entry for the TFIB prefix
+ * prefers the same face continuously for the forwarding-plane stability window,
+ * the entry moves to Standby: strategy control returns to the normal pipeline,
+ * but the entry is kept as a fallback until this generation's hardDeadline.
+ * Deletion is table erase, not a third runtime state.
  */
 enum class TfibEntryState
 {
@@ -46,6 +57,9 @@ class TfibEntry
 public:
   /**
    * @brief Constructs a TFIB entry.
+   *
+   * Arms hardDeadline immediately: now + TFIB_STANDBY_MAX_LIFETIME.
+   * Initial expiry is min(now + TFIB_ENTRY_LIFETIME, hardDeadline).
    */
   TfibEntry(const Name& prefix, face::Face& face,
             uint32_t newFaceSeq, uint64_t floodId);
@@ -59,6 +73,9 @@ public:
   const time::steady_clock::time_point&
   getExpiry() const { return m_expiry; }
 
+  const time::steady_clock::time_point&
+  getHardDeadline() const { return m_hardDeadline; }
+
   uint32_t
   getNewFaceSeq() const { return m_newFaceSeq; }
 
@@ -67,12 +84,6 @@ public:
 
   TfibEntryState
   getState() const { return m_state; }
-
-  bool
-  hasNewPathProof() const { return m_newPathProofAccepted; }
-
-  uint64_t
-  getMinAcceptProofSerial() const { return m_minAcceptProofSerial; }
 
 public:
   // These members must be public for boost::multi_index::member
@@ -85,21 +96,11 @@ public:
   std::optional<time::steady_clock::time_point> m_fibAvailableSince;
   TfibEntryState m_state;
   /**
-   * Absolute upper bound on the entry's lifetime, armed when the entry first
-   * enters Standby. It survives a later fallback to Active so that a persistently
-   * broken routing plane cannot keep the entry alive indefinitely.
+   * Absolute upper bound on this generation's lifetime, armed at construction.
+   * Survives Active <-> Standby so local FIB agreement cannot destroy fallback
+   * state before this deadline.
    */
-  std::optional<time::steady_clock::time_point> m_hardDeadline;
-  /**
-   * Set when a valid new-path-calculated proof is accepted for this entry.
-   * Cleared on every insert (new mobility generation).
-   */
-  bool m_newPathProofAccepted;
-  /**
-   * Proof serials at or below this value are rejected as possibly stale relative
-   * to proofs observed before this entry was created.
-   */
-  uint64_t m_minAcceptProofSerial;
+  time::steady_clock::time_point m_hardDeadline;
 };
 
 /**
@@ -109,19 +110,52 @@ enum class TfibUseDecision
 {
   NotFound,  ///< no entry covers the name
   Use,       ///< entry is Active: forward on the TFIB face
-  Standby,   ///< entry is retained but idle: use the FIB and the strategy
-  Released   ///< entry was removed after new-path proof + forwarding agreement
+  Standby    ///< entry is retained but idle: use the FIB and the strategy
 };
 
 /**
- * @brief Result of attempting to accept a new-path-calculated proof.
+ * @brief Result of observing a localhost new-path-calculated Interest.
+ *
+ * Telemetry only. Proofs have no TFIB lifecycle authority.
  */
 enum class TfibProofDecision
 {
   NotFound,   ///< no TFIB entry covers the name
-  Rejected,   ///< serial too old for this entry generation
-  Accepted    ///< proof latched on the matching entry
+  Rejected,   ///< unused; proofs do not affect TFIB generations
+  Accepted    ///< a covering TFIB entry exists; no state is mutated
 };
+
+inline std::ostream&
+operator<<(std::ostream& os, TfibEntryState state)
+{
+  switch (state) {
+    case TfibEntryState::Active: return os << "Active";
+    case TfibEntryState::Standby: return os << "Standby";
+  }
+  return os << "TfibEntryState(" << static_cast<int>(state) << ")";
+}
+
+inline std::ostream&
+operator<<(std::ostream& os, TfibUseDecision decision)
+{
+  switch (decision) {
+    case TfibUseDecision::NotFound: return os << "NotFound";
+    case TfibUseDecision::Use: return os << "Use";
+    case TfibUseDecision::Standby: return os << "Standby";
+  }
+  return os << "TfibUseDecision(" << static_cast<int>(decision) << ")";
+}
+
+inline std::ostream&
+operator<<(std::ostream& os, TfibProofDecision decision)
+{
+  switch (decision) {
+    case TfibProofDecision::NotFound: return os << "NotFound";
+    case TfibProofDecision::Rejected: return os << "Rejected";
+    case TfibProofDecision::Accepted: return os << "Accepted";
+  }
+  return os << "TfibProofDecision(" << static_cast<int>(decision) << ")";
+}
 
 /**
  * @brief The Temporary Forwarding Information Base (TFIB).
@@ -138,12 +172,11 @@ public:
   findLongestPrefixMatch(const Name& name);
 
   /**
-   * @brief Inserts or updates a TFIB entry.
+   * @brief Inserts a TFIB generation.
    *
-   * If an entry for the same prefix exists, it is updated only if the
-   * newFaceSeq is greater than the existing one. A new generation clears any
-   * latched new-path proof and raises the minimum acceptable proof serial above
-   * proofs already observed on this forwarder.
+   * A new prefix or a strictly higher NewFaceSeq replaces the current generation
+   * with a new Active entry and a new hardDeadline. The same sequence is a
+   * complete no-op (face, seq, FloodId, state, expiry, and hardDeadline unchanged).
    */
   void
   insert(const Name& prefix, face::Face& face, uint32_t seq, uint64_t floodId);
@@ -151,37 +184,32 @@ public:
   /**
    * @brief Advances the lifecycle of a TFIB entry on Interest arrival.
    *
-   * @param prefix             key of the entry, as returned by findLongestPrefixMatch
-   * @param fibAgrees          ordinary forwarding currently prefers the TFIB face
-   * @param fibUsable          the FIB has any usable nexthop for this prefix
-   * @param idleTtl            expiry refresh applied while the entry is Active
-   * @param fibStableWindow    how long @p fibAgrees must hold before Standby
-   * @param standbyMaxLifetime upper bound armed when the entry first enters Standby
+   * @param prefix          key of the entry, as returned by findLongestPrefixMatch
+   * @param fibAgrees       exact ordinary FIB currently prefers the TFIB face
+   * @param fibUsable       an exact ordinary FIB entry exists and has nexthops
+   * @param idleTtl         expiry refresh applied while the entry is Active
+   * @param fibStableWindow how long @p fibAgrees must hold before Standby
    *
    * Active stays Active until @p fibAgrees has held for @p fibStableWindow, then
-   * moves to Standby. Standby returns to Active when @p fibUsable is false or
-   * @p fibAgrees is false, and is released once a new-path proof is latched while
-   * forwarding still agrees.
+   * moves to Standby and pins expiry to hardDeadline. Standby returns to Active
+   * when @p fibUsable is false or @p fibAgrees is false, retaining the original
+   * hardDeadline. Proof state is not consulted.
    */
   TfibUseDecision
   onUse(const Name& prefix, bool fibAgrees, bool fibUsable,
-        time::milliseconds idleTtl, time::milliseconds fibStableWindow,
-        time::milliseconds standbyMaxLifetime);
+        time::milliseconds idleTtl, time::milliseconds fibStableWindow);
 
   /**
-   * @brief Records a new-path-calculated proof from the local routing protocol.
+   * @brief Observes a new-path-calculated Interest from the local routing protocol.
+   *
+   * Telemetry only. Does not latch proofs, change Active/Standby, erase entries,
+   * or modify expiry, hardDeadline, or generation authority.
    *
    * @param name   mobile prefix carried in the localhost Interest
-   * @param serial monotonic calculation serial from NLSR
+   * @param serial monotonic calculation serial from NLSR (ignored)
    */
   TfibProofDecision
   acceptNewPathProof(const Name& name, uint64_t serial);
-
-  /**
-   * @brief Highest new-path-calculated serial observed by this forwarder.
-   */
-  uint64_t
-  getMaxObservedProofSerial() const { return m_maxObservedProofSerial; }
 
   /**
    * @brief Erases all entries whose nexthop is the specified face.
@@ -192,9 +220,7 @@ public:
   /**
    * @brief Removes all expired entries from the TFIB.
    *
-   * @return prefixes of the removed entries. An entry reclaimed here was never
-   *         confirmed by a new-path proof, so reporting it separates release on
-   *         proof from release on the standby bound.
+   * @return prefixes of the removed entries.
    */
   std::vector<Name>
   cleanup();
@@ -218,7 +244,6 @@ private:
   >;
 
   Container m_table;
-  uint64_t m_maxObservedProofSerial = 0;
 };
 
 } // namespace table

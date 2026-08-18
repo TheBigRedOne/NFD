@@ -153,6 +153,12 @@ public:
     return m_serviceBranches;
   }
 
+  table::Tfib&
+  getTfib() noexcept
+  {
+    return m_tfib;
+  }
+
   /** \brief Emitted after a ServiceBranch prefix/FaceId pair is inserted for the first time.
    *
    *  Duplicate add of an existing FaceId does not emit. Erase is not signaled.

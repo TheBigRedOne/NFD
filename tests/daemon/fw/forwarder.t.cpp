@@ -1044,6 +1044,35 @@ clearSent(DummyFace& face)
   face.sentData.clear();
 }
 
+table::TfibEntry*
+tfibOf(Forwarder& forwarder, const Name& name)
+{
+  return forwarder.getTfib().findLongestPrefixMatch(name);
+}
+
+void
+driveExactAgreementWindow(ForwarderFixture& fixture, DummyFace& consumer, const Name& name)
+{
+  consumer.receiveInterest(*makeInterest(name, false, 30_s, 1));
+  fixture.advanceClocks(1_ms);
+  fixture.advanceClocks(100_ms, 4900_ms);
+  consumer.receiveInterest(*makeInterest(name, false, 30_s, 3));
+  fixture.advanceClocks(1_ms);
+  fixture.advanceClocks(100_ms, 300_ms);
+  consumer.receiveInterest(*makeInterest(name, false, 30_s, 4));
+  fixture.advanceClocks(1_ms);
+}
+
+void
+sendNewPathProof(ForwarderFixture& fixture, DummyFace& local, const Name& prefix, uint64_t serial)
+{
+  Name proof("/localhost/nfd/optoflood/new-path-calculated");
+  proof.appendNumber(serial);
+  proof.append(prefix);
+  local.receiveInterest(*makeInterest(proof));
+  fixture.advanceClocks(1_ms);
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(ServiceBranch)
@@ -1240,34 +1269,24 @@ BOOST_AUTO_TEST_CASE(TfibReplaceRetainsSet)
   BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
 }
 
-BOOST_AUTO_TEST_CASE(TfibReleaseClearsSet)
+BOOST_AUTO_TEST_CASE(TfibProofDoesNotClearSet)
 {
   auto producer = addFace();
   auto consumer = addFace();
   auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
   installTfib(*this, *producer, "/A", 1, 23);
 
-  consumer->receiveInterest(*makeInterest("/A/content", false, 30_s, 1));
-  this->advanceClocks(1_ms);
+  driveExactAgreementWindow(*this, *consumer, "/A/content");
   BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
 
-  this->advanceClocks(100_ms, 4900_ms);
-  consumer->receiveInterest(*makeInterest("/A/content", false, 30_s, 3));
-  this->advanceClocks(1_ms);
-  this->advanceClocks(100_ms, 300_ms);
-  consumer->receiveInterest(*makeInterest("/A/content", false, 30_s, 4));
-  this->advanceClocks(1_ms);
-
-  Name proof("/localhost/nfd/optoflood/new-path-calculated");
-  proof.appendNumber(1);
-  proof.append(Name("/A"));
-  local->receiveInterest(*makeInterest(proof));
-  this->advanceClocks(1_ms);
-
+  sendNewPathProof(*this, *local, "/A", 1);
   consumer->receiveInterest(*makeInterest("/A/content", false, 30_s, 5));
   this->advanceClocks(1_ms);
 
-  BOOST_CHECK(forwarder.getServiceBranchTable().find("/A") == nullptr);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+  auto* entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  BOOST_CHECK_EQUAL(entry->getState(), table::TfibEntryState::Standby);
 }
 
 BOOST_AUTO_TEST_CASE(TfibExpiryClearsSet)
@@ -1453,6 +1472,245 @@ BOOST_AUTO_TEST_CASE(StaleCsDoesNotBlockLateNextHopFaceId)
 }
 
 BOOST_AUTO_TEST_SUITE_END() // ServiceBranch
+
+BOOST_AUTO_TEST_SUITE(TfibHandover)
+
+BOOST_AUTO_TEST_CASE(ExactPrefixAbsentDoesNotEnterStandby)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 40);
+
+  Fib& fib = forwarder.getFib();
+  fib.erase("/A");
+  fib::Entry* root = fib.insert("/").first;
+  fib.addOrUpdateNextHop(*root, *producer, 0);
+
+  driveExactAgreementWindow(*this, *consumer, "/A/content");
+
+  auto* entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  BOOST_CHECK_EQUAL(entry->getState(), table::TfibEntryState::Active);
+}
+
+BOOST_AUTO_TEST_CASE(ExactPrefixAgreementEntersStandby)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 41);
+
+  driveExactAgreementWindow(*this, *consumer, "/A/content");
+
+  auto* entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  BOOST_CHECK_EQUAL(entry->getState(), table::TfibEntryState::Standby);
+}
+
+BOOST_AUTO_TEST_CASE(StandbyExpiryPinnedToHardDeadline)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 42);
+
+  driveExactAgreementWindow(*this, *consumer, "/A/content");
+  auto* entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  BOOST_CHECK_EQUAL(entry->getState(), table::TfibEntryState::Standby);
+  BOOST_CHECK_EQUAL(entry->getExpiry(), entry->getHardDeadline());
+
+  this->advanceClocks(100_ms, 6_s);
+  entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  BOOST_CHECK_EQUAL(entry->getState(), table::TfibEntryState::Standby);
+}
+
+BOOST_AUTO_TEST_CASE(SecondaryOutageReturnsToActive)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 43);
+
+  driveExactAgreementWindow(*this, *consumer, "/A/content");
+  auto* entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  BOOST_CHECK_EQUAL(entry->getState(), table::TfibEntryState::Standby);
+
+  forwarder.getFib().erase("/A");
+  clearSent(*producer);
+
+  consumer->receiveInterest(*makeInterest("/A/after-withdrawal", false, 30_s, 8));
+  this->advanceClocks(1_ms);
+
+  entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  BOOST_CHECK_EQUAL(entry->getState(), table::TfibEntryState::Active);
+  BOOST_REQUIRE_EQUAL(producer->sentInterests.size(), 1);
+  BOOST_CHECK_EQUAL(producer->sentInterests.back().getName(), Name("/A/after-withdrawal"));
+}
+
+BOOST_AUTO_TEST_CASE(StandbyRemainsUntilHardDeadline)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  installTfib(*this, *producer, "/A", 1, 44);
+
+  driveExactAgreementWindow(*this, *consumer, "/A/content");
+  sendNewPathProof(*this, *local, "/A", 3);
+
+  this->advanceClocks(100_ms, 6_s);
+  auto* entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  BOOST_CHECK_EQUAL(entry->getState(), table::TfibEntryState::Standby);
+  BOOST_CHECK(hasBranch(forwarder, "/A", consumer->getId()));
+
+  this->advanceClocks(100_ms, table::TFIB_STANDBY_MAX_LIFETIME);
+  BOOST_CHECK(tfibOf(forwarder, "/A") == nullptr);
+  BOOST_CHECK(forwarder.getServiceBranchTable().find("/A") == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(ProofWhileActiveHasNoEffect)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  installTfib(*this, *producer, "/A", 1, 45);
+
+  auto* entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  const auto expiry = entry->getExpiry();
+  const auto deadline = entry->getHardDeadline();
+
+  sendNewPathProof(*this, *local, "/A", 5);
+  entry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(entry != nullptr);
+  BOOST_CHECK_EQUAL(entry->getState(), table::TfibEntryState::Active);
+  BOOST_CHECK_EQUAL(entry->getExpiry(), expiry);
+  BOOST_CHECK_EQUAL(entry->getHardDeadline(), deadline);
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 4_s, 2));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Active);
+}
+
+BOOST_AUTO_TEST_CASE(StaleProofAfterReplacementHasNoEffect)
+{
+  auto producer1 = addFace();
+  auto producer2 = addFace();
+  auto consumer = addFace();
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  installTfib(*this, *producer1, "/A", 1, 46);
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *producer2, 0);
+  producer2->receiveData(*makeTfibData("/A", 3, 47));
+  this->advanceClocks(1_ms);
+
+  auto* tfibEntry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(tfibEntry != nullptr);
+  BOOST_CHECK_EQUAL(tfibEntry->getNewFaceSeq(), 3);
+  const auto deadline = tfibEntry->getHardDeadline();
+
+  sendNewPathProof(*this, *local, "/A", 1);
+  tfibEntry = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(tfibEntry != nullptr);
+  BOOST_CHECK_EQUAL(tfibEntry->getNewFaceSeq(), 3);
+  BOOST_CHECK_EQUAL(tfibEntry->getState(), table::TfibEntryState::Active);
+  BOOST_CHECK_EQUAL(tfibEntry->getHardDeadline(), deadline);
+
+  consumer->receiveInterest(*makeInterest("/A/content", false, 4_s, 2));
+  this->advanceClocks(1_ms);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getNewFaceSeq(), 3);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Active);
+}
+
+BOOST_AUTO_TEST_CASE(IngressActiveNoHopLimitFloods)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 48);
+  clearSent(*producer);
+  clearSent(*consumer);
+
+  producer->receiveInterest(*makeInterest("/A/from-upstream", false, 4_s, 2));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(producer->sentInterests.size(), 0);
+  BOOST_REQUIRE_EQUAL(consumer->sentInterests.size(), 1);
+  BOOST_CHECK_EQUAL(consumer->sentInterests.back().getName(), Name("/A/from-upstream"));
+  BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Active);
+}
+
+BOOST_AUTO_TEST_CASE(IngressActiveHopLimitDoesNotReflect)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 49);
+  clearSent(*producer);
+  clearSent(*consumer);
+
+  auto interest = makeInterest("/A/from-upstream", false, 4_s, 2);
+  interest->setHopLimit(8);
+  producer->receiveInterest(*interest);
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(producer->sentInterests.size(), 0);
+  BOOST_REQUIRE_EQUAL(consumer->sentInterests.size(), 1);
+  BOOST_CHECK_EQUAL(consumer->sentInterests.back().getName(), Name("/A/from-upstream"));
+  BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Active);
+}
+
+BOOST_AUTO_TEST_CASE(IngressStandbyDoesNotReactivateOrReflect)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 50);
+
+  driveExactAgreementWindow(*this, *consumer, "/A/content");
+  BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Standby);
+
+  clearSent(*producer);
+  clearSent(*consumer);
+  producer->receiveInterest(*makeInterest("/A/from-upstream", false, 4_s, 9));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(producer->sentInterests.size(), 0);
+  BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Standby);
+}
+
+BOOST_AUTO_TEST_CASE(FaceRemoveWhileActive)
+{
+  auto producer = addFace();
+  installTfib(*this, *producer, "/A", 1, 51);
+  BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Active);
+
+  producer->close();
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(tfibOf(forwarder, "/A") == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(FaceRemoveWhileStandby)
+{
+  auto producer = addFace();
+  auto consumer = addFace();
+  installTfib(*this, *producer, "/A", 1, 52);
+
+  driveExactAgreementWindow(*this, *consumer, "/A/content");
+  BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Standby);
+
+  producer->close();
+  this->advanceClocks(1_ms);
+  BOOST_CHECK(tfibOf(forwarder, "/A") == nullptr);
+}
+
+BOOST_AUTO_TEST_SUITE_END() // TfibHandover
 
 BOOST_AUTO_TEST_SUITE_END() // TestForwarder
 BOOST_AUTO_TEST_SUITE_END() // Fw
