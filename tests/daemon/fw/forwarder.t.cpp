@@ -1663,7 +1663,7 @@ BOOST_AUTO_TEST_CASE(IngressActiveHopLimitDoesNotReflect)
   BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Active);
 }
 
-BOOST_AUTO_TEST_CASE(IngressStandbyDoesNotReactivateOrReflect)
+BOOST_AUTO_TEST_CASE(StandbyIngressDoesNotTfibUse)
 {
   auto producer = addFace();
   auto consumer = addFace();
@@ -1675,11 +1675,28 @@ BOOST_AUTO_TEST_CASE(IngressStandbyDoesNotReactivateOrReflect)
 
   clearSent(*producer);
   clearSent(*consumer);
-  producer->receiveInterest(*makeInterest("/A/from-upstream", false, 4_s, 9));
+  const Interest::Nonce inNonce(9);
+  producer->receiveInterest(*makeInterest("/A/from-upstream", false, 4_s, inNonce));
   this->advanceClocks(1_ms);
 
-  BOOST_CHECK_EQUAL(producer->sentInterests.size(), 0);
   BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Standby);
+
+  BOOST_REQUIRE_EQUAL(producer->sentInterests.size(), 1);
+  BOOST_REQUIRE_EQUAL(consumer->sentInterests.size(), 1);
+  const Interest& toIngress = producer->sentInterests.back();
+  const Interest& toOther = consumer->sentInterests.back();
+  BOOST_CHECK_EQUAL(toIngress.getName(), Name("/A/from-upstream"));
+  BOOST_CHECK_EQUAL(toOther.getName(), Name("/A/from-upstream"));
+  BOOST_CHECK(toIngress.getNonce() != inNonce);
+  BOOST_CHECK_EQUAL(toIngress.getNonce(), toOther.getNonce());
+  // Matches Forwarder's private OPTOFLOOD_HOP_LIMIT used by handleInterestFlooding.
+  constexpr uint8_t expectedFloodHopLimit = 3;
+  BOOST_REQUIRE(toIngress.getHopLimit());
+  BOOST_CHECK_EQUAL(*toIngress.getHopLimit(), expectedFloodHopLimit);
+  BOOST_REQUIRE(toOther.getHopLimit());
+  BOOST_CHECK_EQUAL(*toOther.getHopLimit(), expectedFloodHopLimit);
+
   BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Standby);
 }
 
