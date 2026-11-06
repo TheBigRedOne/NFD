@@ -271,10 +271,6 @@ private:
 
   void
   scheduleFloodRateReset();
-  void
-  scheduleInterestFloodCleanup();
-  bool
-  markInterestFlooded(const Interest& interest);
 
   void
   onContentStoreHit(const Interest& interest, const FaceEndpoint& ingress,
@@ -288,11 +284,6 @@ private:
   void
   handleOptoFloodData(Data data, const FaceEndpoint& ingress,
                       const std::unordered_set<uint64_t>& suppressedFaces);
-  void
-  handleInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
-                         const shared_ptr<pit::Entry>& pitEntry,
-                         std::optional<uint64_t> excludeFaceId = std::nullopt,
-                         bool allowIngress = false);
   bool
   checkFloodRate(const ndn::Name& producerPrefix);
 
@@ -376,32 +367,10 @@ private:
   RateLimitMap m_floodRateMap;
   ndn::scheduler::ScopedEventId m_floodRateResetEvent;
 
-  struct InterestFloodKey {
-    InterestFloodKey(const ndn::Name& name, ndn::Interest::Nonce nonce);
-    bool operator==(const InterestFloodKey& other) const;
-
-    ndn::Name name;
-    ndn::Interest::Nonce nonce;
-  };
-
-  struct InterestFloodKeyHash {
-    size_t operator()(const InterestFloodKey& key) const noexcept;
-  };
-
-  using InterestFloodCache = std::unordered_map<InterestFloodKey,
-                                                ndn::time::steady_clock::time_point,
-                                                InterestFloodKeyHash>;
-  InterestFloodCache m_interestFloodCache;
-  ndn::scheduler::ScopedEventId m_interestFloodCleanupEvent;
-
   // OptoFlood constants
   static constexpr time::milliseconds TFIB_CLEANUP_INTERVAL = 100_ms;
   static constexpr time::seconds FLOOD_RATE_RESET_INTERVAL = 1_s;
-  // Blind-flood radius for Interests when the temporary reverse path loops back.
-  static constexpr uint8_t OPTOFLOOD_HOP_LIMIT = 3;
   static constexpr size_t OPTOFLOOD_RATE_LIMIT = 100; // packets per second
-  static constexpr time::milliseconds INTEREST_FLOOD_CACHE_TTL = 1000_ms;
-  static constexpr time::milliseconds INTEREST_FLOOD_CLEANUP_INTERVAL = 100_ms;
   // Upper bound on distinct FloodIds retained for duplicate suppression; the
   // cache is cleared on overflow to bound memory (see handleOptoFloodData).
   static constexpr size_t OPTOFLOOD_FLOOD_ID_CACHE_MAX = 4096;

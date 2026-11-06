@@ -1625,7 +1625,7 @@ BOOST_AUTO_TEST_CASE(StaleProofAfterReplacementHasNoEffect)
   BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Active);
 }
 
-BOOST_AUTO_TEST_CASE(IngressActiveNoHopLimitFloods)
+BOOST_AUTO_TEST_CASE(IngressActiveNoEligibleNextHopNacks)
 {
   auto producer = addFace();
   auto consumer = addFace();
@@ -1637,19 +1637,28 @@ BOOST_AUTO_TEST_CASE(IngressActiveNoHopLimitFloods)
   this->advanceClocks(1_ms);
 
   BOOST_CHECK_EQUAL(producer->sentInterests.size(), 0);
-  BOOST_REQUIRE_EQUAL(consumer->sentInterests.size(), 1);
-  BOOST_CHECK_EQUAL(consumer->sentInterests.back().getName(), Name("/A/from-upstream"));
+  BOOST_CHECK_EQUAL(consumer->sentInterests.size(), 0);
+  BOOST_REQUIRE_EQUAL(producer->sentNacks.size(), 1);
+  BOOST_CHECK_EQUAL(producer->sentNacks.back().getReason(), lp::NackReason::NO_ROUTE);
+  BOOST_CHECK_EQUAL(producer->sentNacks.back().getInterest().getName(), Name("/A/from-upstream"));
   BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getNewFaceSeq(), 1);
   BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Active);
 }
 
-BOOST_AUTO_TEST_CASE(IngressActiveHopLimitDoesNotReflect)
+BOOST_AUTO_TEST_CASE(IngressActiveUsesEligibleFibNextHop)
 {
   auto producer = addFace();
-  auto consumer = addFace();
+  auto alternate = addFace();
+  auto bystander = addFace();
   installTfib(*this, *producer, "/A", 1, 49);
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *alternate, 0);
   clearSent(*producer);
-  clearSent(*consumer);
+  clearSent(*alternate);
+  clearSent(*bystander);
 
   auto interest = makeInterest("/A/from-upstream", false, 4_s, 2);
   interest->setHopLimit(8);
@@ -1657,9 +1666,14 @@ BOOST_AUTO_TEST_CASE(IngressActiveHopLimitDoesNotReflect)
   this->advanceClocks(1_ms);
 
   BOOST_CHECK_EQUAL(producer->sentInterests.size(), 0);
-  BOOST_REQUIRE_EQUAL(consumer->sentInterests.size(), 1);
-  BOOST_CHECK_EQUAL(consumer->sentInterests.back().getName(), Name("/A/from-upstream"));
+  BOOST_CHECK_EQUAL(producer->sentNacks.size(), 0);
+  BOOST_CHECK_EQUAL(bystander->sentInterests.size(), 0);
+  BOOST_REQUIRE_EQUAL(alternate->sentInterests.size(), 1);
+  BOOST_CHECK_EQUAL(alternate->sentInterests.back().getName(), Name("/A/from-upstream"));
+  BOOST_REQUIRE(alternate->sentInterests.back().getHopLimit());
+  BOOST_CHECK_EQUAL(*alternate->sentInterests.back().getHopLimit(), 7);
   BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
+  BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getNewFaceSeq(), 1);
   BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Active);
 }
 
@@ -1682,22 +1696,42 @@ BOOST_AUTO_TEST_CASE(StandbyIngressDoesNotTfibUse)
   BOOST_REQUIRE(tfibOf(forwarder, "/A") != nullptr);
   BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Standby);
 
-  BOOST_REQUIRE_EQUAL(producer->sentInterests.size(), 1);
-  BOOST_REQUIRE_EQUAL(consumer->sentInterests.size(), 1);
-  const Interest& toIngress = producer->sentInterests.back();
-  const Interest& toOther = consumer->sentInterests.back();
-  BOOST_CHECK_EQUAL(toIngress.getName(), Name("/A/from-upstream"));
-  BOOST_CHECK_EQUAL(toOther.getName(), Name("/A/from-upstream"));
-  BOOST_CHECK(toIngress.getNonce() != inNonce);
-  BOOST_CHECK_EQUAL(toIngress.getNonce(), toOther.getNonce());
-  // Matches Forwarder's private OPTOFLOOD_HOP_LIMIT used by handleInterestFlooding.
-  constexpr uint8_t expectedFloodHopLimit = 3;
-  BOOST_REQUIRE(toIngress.getHopLimit());
-  BOOST_CHECK_EQUAL(*toIngress.getHopLimit(), expectedFloodHopLimit);
-  BOOST_REQUIRE(toOther.getHopLimit());
-  BOOST_CHECK_EQUAL(*toOther.getHopLimit(), expectedFloodHopLimit);
-
+  BOOST_CHECK_EQUAL(producer->sentInterests.size(), 0);
+  BOOST_CHECK_EQUAL(consumer->sentInterests.size(), 0);
+  BOOST_REQUIRE_EQUAL(producer->sentNacks.size(), 1);
+  BOOST_CHECK_EQUAL(producer->sentNacks.back().getReason(), lp::NackReason::NO_ROUTE);
+  BOOST_CHECK_EQUAL(producer->sentNacks.back().getInterest().getName(), Name("/A/from-upstream"));
   BOOST_CHECK_EQUAL(tfibOf(forwarder, "/A")->getState(), table::TfibEntryState::Standby);
+}
+
+BOOST_AUTO_TEST_CASE(NoRouteNackPropagatesDownstream)
+{
+  auto consumer = addFace();
+  auto upstream = addFace();
+  auto other = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *upstream, 0);
+
+  consumer->receiveInterest(*makeInterest("/A/obj", false, 4_s, 3));
+  this->advanceClocks(1_ms);
+  BOOST_REQUIRE_EQUAL(upstream->sentInterests.size(), 1);
+
+  lp::Nack nack(upstream->sentInterests.back());
+  nack.setReason(lp::NackReason::NO_ROUTE);
+  clearSent(*consumer);
+  clearSent(*upstream);
+  clearSent(*other);
+  upstream->receiveNack(nack);
+  this->advanceClocks(1_ms);
+
+  BOOST_REQUIRE_EQUAL(consumer->sentNacks.size(), 1);
+  BOOST_CHECK_EQUAL(consumer->sentNacks.back().getReason(), lp::NackReason::NO_ROUTE);
+  BOOST_CHECK_EQUAL(consumer->sentNacks.back().getInterest().getName(), Name("/A/obj"));
+  BOOST_CHECK_EQUAL(other->sentInterests.size(), 0);
+  BOOST_CHECK_EQUAL(upstream->sentInterests.size(), 0);
+  BOOST_CHECK_EQUAL(consumer->sentInterests.size(), 0);
 }
 
 BOOST_AUTO_TEST_CASE(FaceRemoveWhileActive)

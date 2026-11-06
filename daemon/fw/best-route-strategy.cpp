@@ -79,13 +79,10 @@ BestRouteStrategy::afterReceiveInterest(const Interest& interest, const FaceEndp
 
     if (it == nexthops.end()) {
       NFD_LOG_INTEREST_FROM(interest, ingress, "new no-nexthop");
-      if (!this->triggerInterestFlooding(interest, ingress, pitEntry, std::nullopt, true)) {
-        lp::NackHeader nackHeader;
-        nackHeader.setReason(lp::NackReason::NO_ROUTE);
-        lp::Nack nackPkt(interest);
-        nackPkt.setHeader(nackHeader);
-        this->sendNack(nackPkt, ingress.face);
-      }
+      lp::NackHeader nackHeader;
+      nackHeader.setReason(lp::NackReason::NO_ROUTE);
+      this->sendNack(nackHeader, ingress.face, pitEntry);
+      this->rejectPendingInterest(pitEntry);
       return;
     }
 
@@ -112,13 +109,6 @@ BestRouteStrategy::afterReceiveInterest(const Interest& interest, const FaceEndp
   it = findEligibleNextHopWithEarliestOutRecord(ingress.face, interest, nexthops, pitEntry);
   if (it == nexthops.end()) {
     NFD_LOG_INTEREST_FROM(interest, ingress, "retx no-nexthop");
-    if (!this->triggerInterestFlooding(interest, ingress, pitEntry, std::nullopt, true)) {
-      lp::NackHeader nackHeader;
-      nackHeader.setReason(lp::NackReason::NO_ROUTE);
-      lp::Nack nackPkt(interest);
-      nackPkt.setHeader(nackHeader);
-      this->sendNack(nackPkt, ingress.face);
-    }
   }
   else {
     Face& outFace = it->getFace();
@@ -131,14 +121,6 @@ void
 BestRouteStrategy::afterReceiveNack(const lp::Nack& nack, const FaceEndpoint& ingress,
                                     const shared_ptr<pit::Entry>& pitEntry)
 {
-  const Interest& interest = nack.getInterest();
-  if (nack.getReason() == lp::NackReason::NO_ROUTE) {
-    NFD_LOG_DEBUG("OptoFlood nack-trigger flood interest=" << interest.getName()
-                  << " nonce=" << interest.getNonce() << " reason=" << nack.getReason());
-    if (this->triggerInterestFlooding(interest, ingress, pitEntry, ingress.face.getId())) {
-      this->setExpiryTimer(pitEntry, interest.getInterestLifetime());
-    }
-  }
   this->processNack(nack, ingress.face, pitEntry);
 }
 

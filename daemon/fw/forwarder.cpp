@@ -38,8 +38,6 @@
 
 #include <ndn-cxx/lp/pit-token.hpp>
 #include <ndn-cxx/lp/tags.hpp>
-#include <boost/endian/conversion.hpp>
-#include <cstring>
 
 namespace nfd {
 
@@ -124,29 +122,6 @@ getDefaultStrategyName()
   return fw::BestRouteStrategy::getStrategyName();
 }
 
-Forwarder::InterestFloodKey::InterestFloodKey(const Name& n, ndn::Interest::Nonce nonceId)
-  : name(n)
-  , nonce(nonceId)
-{
-}
-
-bool
-Forwarder::InterestFloodKey::operator==(const InterestFloodKey& other) const
-{
-  return nonce == other.nonce && name == other.name;
-}
-
-size_t
-Forwarder::InterestFloodKeyHash::operator()(const InterestFloodKey& key) const noexcept
-{
-  size_t seed = std::hash<Name>()(key.name);
-  uint32_t nonceValue = 0;
-  std::memcpy(&nonceValue, key.nonce.data(), sizeof(nonceValue));
-  boost::endian::big_to_native_inplace(nonceValue);
-  seed ^= std::hash<uint32_t>()(nonceValue) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-  return seed;
-}
-
 Forwarder::Forwarder(FaceTable& faceTable)
   : m_faceTable(faceTable)
   , m_unsolicitedDataPolicy(make_unique<fw::DefaultUnsolicitedDataPolicy>())
@@ -157,7 +132,6 @@ Forwarder::Forwarder(FaceTable& faceTable)
 {
   scheduleTfibCleanup();
   scheduleFloodRateReset();
-  scheduleInterestFloodCleanup();
 
   m_faceTable.afterAdd.connect([this] (const Face& face) {
     face.afterReceiveInterest.connect(
@@ -190,6 +164,7 @@ Forwarder::Forwarder(FaceTable& faceTable)
 
   m_strategyChoice.setDefaultStrategy(getDefaultStrategyName());
 }
+
 void
 Forwarder::scheduleTfibCleanup()
 {
@@ -209,35 +184,6 @@ Forwarder::scheduleFloodRateReset()
     m_floodRateMap.clear();
     scheduleFloodRateReset();
   });
-}
-
-void
-Forwarder::scheduleInterestFloodCleanup()
-{
-  m_interestFloodCleanupEvent = getScheduler().schedule(INTEREST_FLOOD_CLEANUP_INTERVAL, [this] {
-    auto now = time::steady_clock::now();
-    for (auto it = m_interestFloodCache.begin(); it != m_interestFloodCache.end();) {
-      if (it->second <= now) {
-        it = m_interestFloodCache.erase(it);
-      }
-      else {
-        ++it;
-      }
-    }
-    scheduleInterestFloodCleanup();
-  });
-}
-
-bool
-Forwarder::markInterestFlooded(const Interest& interest)
-{
-  InterestFloodKey key(interest.getName(), interest.getNonce());
-  auto expiry = time::steady_clock::now() + INTEREST_FLOOD_CACHE_TTL;
-  auto result = m_interestFloodCache.emplace(std::move(key), expiry);
-  if (!result.second) {
-    return false;
-  }
-  return true;
 }
 
 void
@@ -414,21 +360,6 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
     const Name tfibPrefix = tfibEntry->getPrefix();
     const bool wasActive = tfibEntry->getState() == table::TfibEntryState::Active;
     const bool fromTfibIngress = tfibFace.getId() == ingress.face.getId();
-    if (wasActive && fromTfibIngress && !interest.getHopLimit()) {
-      if (markInterestFlooded(interest)) {
-        Interest floodInterest = interest;
-        floodInterest.refreshNonce();
-        markInterestFlooded(floodInterest);
-        NFD_LOG_DEBUG("OptoFlood tfib-ingress flood interest=" << floodInterest.getName()
-                      << " nonce=" << floodInterest.getNonce());
-        handleInterestFlooding(floodInterest, ingress, pitEntry);
-      }
-      else {
-        NFD_LOG_DEBUG("OptoFlood tfib-ingress flood skipped interest=" << interest.getName()
-                      << " nonce=" << interest.getNonce() << " reason=already-flooded");
-      }
-      return;
-    }
     // Ingress == TFIB face must not Use-send back to that same face. Skip onUse
     // so Standby cannot treat ingress ineligibility as disagreement.
     if (!fromTfibIngress) {
@@ -463,20 +394,6 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
           break;
       }
     }
-  }
-
-  // Continue flooding for Interests already carrying HopLimit
-  if (interest.getHopLimit()) {
-    if (markInterestFlooded(interest)) {
-      NFD_LOG_DEBUG("OptoFlood continue flood interest=" << interest.getName()
-                    << " nonce=" << interest.getNonce());
-      handleInterestFlooding(interest, ingress, pitEntry);
-    }
-    else {
-      NFD_LOG_DEBUG("OptoFlood continue flood skipped interest=" << interest.getName()
-                    << " nonce=" << interest.getNonce() << " reason=already-flooded");
-    }
-    return;
   }
 
   // dispatch to strategy: after receive Interest
@@ -1210,46 +1127,6 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
   }
 }
 
-
-void
-Forwarder::handleInterestFlooding(const Interest& interest, const FaceEndpoint& ingress,
-                                  const shared_ptr<pit::Entry>& pitEntry,
-                                  std::optional<uint64_t> excludeFaceId,
-                                  bool allowIngress)
-{
-  Interest floodInterest = interest;
-  if (!floodInterest.getHopLimit()) {
-    floodInterest.setHopLimit(OPTOFLOOD_HOP_LIMIT);
-  }
-
-  std::unordered_set<uint64_t> sentFaces;
-  for (auto& face : m_faceTable) {
-    if (excludeFaceId && face.getId() == *excludeFaceId) {
-      continue;
-    }
-    if (!allowIngress && face.getId() == ingress.face.getId()) {
-      continue;
-    }
-    if (face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
-      continue;
-    }
-    if (face.getLinkType() != ndn::nfd::LINK_TYPE_POINT_TO_POINT) {
-      continue;
-    }
-    if (!sentFaces.insert(face.getId()).second) {
-      continue;
-    }
-    NFD_LOG_DEBUG("OptoFlood forward interest=" << floodInterest.getName()
-                  << " nonce=" << floodInterest.getNonce()
-                  << " outFace=" << face.getId()
-                  << " hopLimit=" << static_cast<unsigned>(*floodInterest.getHopLimit()));
-    onOutgoingInterest(floodInterest, face, pitEntry);
-  }
-
-  if (sentFaces.empty()) {
-    NFD_LOG_DEBUG("OptoFlood interest had no eligible outFace name=" << floodInterest.getName());
-  }
-}
 
 bool
 Forwarder::checkFloodRate(const ndn::Name& producerPrefix)
