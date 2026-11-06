@@ -399,9 +399,6 @@ private:
   static constexpr time::seconds FLOOD_RATE_RESET_INTERVAL = 1_s;
   // Blind-flood radius for Interests when the temporary reverse path loops back.
   static constexpr uint8_t OPTOFLOOD_HOP_LIMIT = 3;
-  // Blind-flood radius for Data at nodes lacking a FIB next-hop. Defensive
-  // fallback: inert when the producer prefix is advertised network-wide.
-  static constexpr uint8_t OPTOFLOOD_DATA_HOP_LIMIT = 1;
   static constexpr size_t OPTOFLOOD_RATE_LIMIT = 100; // packets per second
   static constexpr time::milliseconds INTEREST_FLOOD_CACHE_TTL = 1000_ms;
   static constexpr time::milliseconds INTEREST_FLOOD_CLEANUP_INTERVAL = 100_ms;

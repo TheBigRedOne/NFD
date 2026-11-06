@@ -1729,6 +1729,265 @@ BOOST_AUTO_TEST_CASE(FaceRemoveWhileStandby)
 
 BOOST_AUTO_TEST_SUITE_END() // TfibHandover
 
+BOOST_AUTO_TEST_SUITE(RecoveryDataForwarding)
+
+shared_ptr<Data>
+markLocalRecovery(const Name& name, uint64_t epoch)
+{
+  auto data = makeData(name);
+  data->setTag(std::make_shared<lp::OptoMobilityFlag>(lp::EmptyValue()));
+  data->setTag(std::make_shared<lp::OptoMobilityEpoch>(epoch));
+  return data;
+}
+
+shared_ptr<Data>
+makeGuardData(const Name& name, uint32_t seq, uint64_t floodId)
+{
+  auto data = makeData(name);
+  ndn::MetaInfo mi;
+  mi.addAppMetaInfo(ndn::optoflood::makeFloodIdBlock(floodId));
+  mi.addAppMetaInfo(ndn::optoflood::makeNewFaceSeqBlock(seq));
+  data->setMetaInfo(mi);
+  return data;
+}
+
+BOOST_AUTO_TEST_CASE(LocalInjectionReachesEligibleNetworkFaces)
+{
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  auto pitFace = addFace();
+  auto net1 = addFace();
+  auto net2 = addFace();
+  auto otherLocal = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  auto multiAccess = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_NON_LOCAL,
+                              ndn::nfd::FACE_PERSISTENCY_PERSISTENT,
+                              ndn::nfd::LINK_TYPE_MULTI_ACCESS);
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *local, 0);
+
+  pitFace->receiveInterest(*makeInterest("/A/obj", false, 4_s, 1));
+  this->advanceClocks(1_ms);
+  clearSent(*local);
+  clearSent(*pitFace);
+  clearSent(*net1);
+  clearSent(*net2);
+  clearSent(*otherLocal);
+  clearSent(*multiAccess);
+
+  local->receiveData(*markLocalRecovery("/A/obj", 1));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(net1->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(net2->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(pitFace->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(local->sentData.size(), 0);
+  BOOST_CHECK_EQUAL(otherLocal->sentData.size(), 0);
+  BOOST_CHECK_EQUAL(multiAccess->sentData.size(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(RemoteWithoutEligibleFibDoesNotFallback)
+{
+  auto ingress = addFace();
+  auto consumer = addFace();
+  auto neighbor = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *ingress, 0);
+
+  consumer->receiveInterest(*makeInterest("/A/obj", false, 4_s, 2));
+  this->advanceClocks(1_ms);
+  clearSent(*ingress);
+  clearSent(*consumer);
+  clearSent(*neighbor);
+
+  ingress->receiveData(*makeGuardData("/A/obj", 4, 77));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(neighbor->sentData.size(), 0);
+  BOOST_CHECK_EQUAL(ingress->sentData.size(), 0);
+  BOOST_REQUIRE_EQUAL(consumer->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(consumer->sentData.back().getName(), "/A/obj");
+  auto* tfib = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(tfib != nullptr);
+  BOOST_CHECK_EQUAL(tfib->getFace().getId(), ingress->getId());
+  BOOST_CHECK_EQUAL(tfib->getNewFaceSeq(), 4);
+}
+
+BOOST_AUTO_TEST_CASE(RemoteMultipathUsesOnlyFibNextHops)
+{
+  auto ingress = addFace();
+  auto fib1 = addFace();
+  auto fib2 = addFace();
+  auto extra = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *fib1, 0);
+  fib.addOrUpdateNextHop(*entry, *fib2, 1);
+
+  ingress->receiveData(*makeGuardData("/A/obj", 2, 88));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(fib1->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(fib2->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(extra->sentData.size(), 0);
+  BOOST_CHECK_EQUAL(ingress->sentData.size(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(OnePitEntrySatisfiesEveryInRecord)
+{
+  auto ingress = addFace();
+  auto consumer1 = addFace();
+  auto consumer2 = addFace();
+  auto neighbor = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *ingress, 0);
+
+  consumer1->receiveInterest(*makeInterest("/A/obj", false, 4_s, 11));
+  consumer2->receiveInterest(*makeInterest("/A/obj", false, 4_s, 12));
+  this->advanceClocks(1_ms);
+  clearSent(*ingress);
+  clearSent(*consumer1);
+  clearSent(*consumer2);
+  clearSent(*neighbor);
+
+  ingress->receiveData(*makeGuardData("/A/obj", 5, 99));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(consumer1->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(consumer2->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(neighbor->sentData.size(), 0);
+  BOOST_CHECK_EQUAL(ingress->sentData.size(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(PitInRecordReceivesMarkedLocalRecovery)
+{
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  auto attachment = addFace();
+  auto other = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *local, 0);
+
+  attachment->receiveInterest(*makeInterest("/A/obj", false, 4_s, 21));
+  this->advanceClocks(1_ms);
+  clearSent(*local);
+  clearSent(*attachment);
+  clearSent(*other);
+
+  local->receiveData(*markLocalRecovery("/A/obj", 6));
+  this->advanceClocks(1_ms);
+
+  BOOST_REQUIRE_EQUAL(attachment->sentData.size(), 1);
+  BOOST_CHECK(attachment->sentData.back().getTag<lp::OptoMobilityFlag>() != nullptr);
+  BOOST_CHECK_EQUAL(other->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(local->sentData.size(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(GuardMetaInfoIsRecognizedWithoutLpFlag)
+{
+  auto ingress = addFace();
+  auto consumer = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *ingress, 0);
+
+  consumer->receiveInterest(*makeInterest("/A/_guard", false, 4_s, 31));
+  this->advanceClocks(1_ms);
+  clearSent(*ingress);
+  clearSent(*consumer);
+
+  auto guard = makeGuardData("/A/_guard", 7, 4294967302ULL);
+  BOOST_CHECK(guard->getTag<lp::OptoMobilityFlag>() == nullptr);
+  ingress->receiveData(*guard);
+  this->advanceClocks(1_ms);
+
+  BOOST_REQUIRE_EQUAL(consumer->sentData.size(), 1);
+  auto floodId = ndn::optoflood::getFloodId(consumer->sentData.back().getMetaInfo());
+  BOOST_REQUIRE(floodId.has_value());
+  BOOST_CHECK_EQUAL(*floodId, 4294967302ULL);
+  auto* tfib = tfibOf(forwarder, "/A");
+  BOOST_REQUIRE(tfib != nullptr);
+  BOOST_CHECK_EQUAL(tfib->getFace().getId(), ingress->getId());
+  BOOST_CHECK_EQUAL(tfib->getNewFaceSeq(), 7);
+}
+
+BOOST_AUTO_TEST_CASE(UnmarkedDataOnlySatisfiesPit)
+{
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  auto consumer = addFace();
+  auto neighbor = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *local, 0);
+
+  consumer->receiveInterest(*makeInterest("/A/obj", false, 4_s, 41));
+  this->advanceClocks(1_ms);
+  clearSent(*local);
+  clearSent(*consumer);
+  clearSent(*neighbor);
+
+  local->receiveData(*makeData("/A/obj"));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(consumer->sentData.size(), 1);
+  BOOST_CHECK(consumer->sentData.back().getTag<lp::OptoMobilityFlag>() == nullptr);
+  BOOST_CHECK_EQUAL(neighbor->sentData.size(), 0);
+  BOOST_CHECK(tfibOf(forwarder, "/A") == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(LocalMarkedDataWithoutPitDoesNotInject)
+{
+  auto local = addFace("dummy://", "dummy://", ndn::nfd::FACE_SCOPE_LOCAL);
+  auto neighbor = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *local, 0);
+
+  local->receiveData(*markLocalRecovery("/A/plain", 1));
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(neighbor->sentData.size(), 0);
+  BOOST_CHECK_EQUAL(local->sentData.size(), 0);
+  BOOST_CHECK(tfibOf(forwarder, "/A") == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(DuplicateFloodIdDoesNotForwardAgain)
+{
+  auto ingress = addFace();
+  auto fib1 = addFace();
+  auto fib2 = addFace();
+
+  Fib& fib = forwarder.getFib();
+  fib::Entry* entry = fib.insert("/A").first;
+  fib.addOrUpdateNextHop(*entry, *fib1, 0);
+  fib.addOrUpdateNextHop(*entry, *fib2, 1);
+
+  auto data = makeGuardData("/A/obj", 2, 88);
+  ingress->receiveData(*data);
+  this->advanceClocks(1_ms);
+  BOOST_CHECK_EQUAL(fib1->sentData.size(), 1);
+  BOOST_CHECK_EQUAL(fib2->sentData.size(), 1);
+
+  clearSent(*fib1);
+  clearSent(*fib2);
+  ingress->receiveData(*data);
+  this->advanceClocks(1_ms);
+
+  BOOST_CHECK_EQUAL(fib1->sentData.size(), 0);
+  BOOST_CHECK_EQUAL(fib2->sentData.size(), 0);
+}
+
+BOOST_AUTO_TEST_SUITE_END() // RecoveryDataForwarding
+
 BOOST_AUTO_TEST_SUITE_END() // TestForwarder
 BOOST_AUTO_TEST_SUITE_END() // Fw
 

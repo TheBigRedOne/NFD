@@ -1089,7 +1089,8 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
   // Data name (empty match, or only a default route), there is no meaningful key:
   // skip rate limiting and TFIB rather than key on the root prefix
   // (over-broad, would capture all Interests) or a per-frame component (ineffective
-  // for other frames). The Data still propagates via the flooding path below.
+  // for other frames). Face selection below uses eligible FIB next hops, or
+  // adjacent injection only when the ingress is local.
   if (!producerPrefix.empty()) {
     // Rate Limiting
     if (!checkFloodRate(producerPrefix)) {
@@ -1138,56 +1139,18 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
     }
   }
 
-  uint64_t hopLimit = 0;
-  // No FIB next-hop: fall back to hop-limited blind flooding over adjacent faces.
-  // Defensive path, inert when the producer prefix is advertised network-wide.
-  const bool useHopLimit = !hasFibNextHops;
-  if (useHopLimit) {
-    if (auto tag = data.getTag<ndn::lp::OptoHopLimit>()) {
-      hopLimit = *tag;
-    }
-    else {
-      hopLimit = OPTOFLOOD_DATA_HOP_LIMIT;
-    }
-  }
-  else if (auto tag = data.getTag<ndn::lp::OptoHopLimit>()) {
-    hopLimit = *tag;
-  }
+  NFD_LOG_DEBUG("OptoFlood process data=" << data.getName()
+                << " floodId=" << *floodIdOpt
+                << " ingress=" << ingress.face.getId());
 
-  if (useHopLimit) {
-    NFD_LOG_DEBUG("OptoFlood process data=" << data.getName()
-                  << " floodId=" << *floodIdOpt
-                  << " ingress=" << ingress.face.getId()
-                  << " hopLimit=" << hopLimit);
-  }
-  else {
-    NFD_LOG_DEBUG("OptoFlood process data=" << data.getName()
-                  << " floodId=" << *floodIdOpt
-                  << " ingress=" << ingress.face.getId()
-                  << " hopLimit=disabled");
-  }
-
-  if (useHopLimit && hopLimit == 0) {
-    NFD_LOG_DEBUG("OptoFlood stop data=" << data.getName()
-                  << " floodId=" << *floodIdOpt
-                  << " reason=hopLimit-zero");
-    return;
-  }
-
-  // decrement and forward according to policy:
-  // (1) Prefer FIB next-hops (non-LOCAL), excluding ingress
-  // (2) If no FIB next-hops, fallback to adjacent faces (non-LOCAL), excluding ingress
-  if (useHopLimit) {
-    data.setTag(std::make_shared<ndn::lp::OptoHopLimit>(hopLimit - 1));
-  }
-  // Ensure LP MobilityFlag is present during flooding
+  // Business Data is recognised downstream only by this LP tag. Guard Data is
+  // recognised from its signed MetaInfo and does not depend on the tag.
   data.setTag(std::make_shared<ndn::lp::OptoMobilityFlag>(ndn::lp::EmptyValue()));
 
   std::vector<Face*> outFaces;
   outFaces.reserve(8);
 
   if (hasFibNextHops) {
-    // Use FIB next hops first
     for (const auto& nh : fibEntry.getNextHops()) {
       Face& out = nh.getFace();
       if (out.getId() == ingress.face.getId()) {
@@ -1206,8 +1169,12 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
     }
   }
 
-  if (outFaces.empty()) {
-    // Fallback to adjacent faces (exclude LOCAL and ingress)
+  // No eligible FIB direction. A local ingress injects onto the remaining
+  // adjacent point-to-point faces, which is how a producer reaches the network
+  // when its only FIB next hop is its own application face. A remote ingress
+  // stops; PIT satisfaction is independent and still uses the in-records.
+  if (outFaces.empty() &&
+      ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
     for (auto& f : m_faceTable) {
       if (f.getId() == ingress.face.getId()) {
         continue;
@@ -1225,25 +1192,15 @@ Forwarder::handleOptoFloodData(Data data, const FaceEndpoint& ingress,
     }
   }
 
-  // Deduplicate and send
   std::unordered_set<uint64_t> sentIds;
   for (Face* f : outFaces) {
     if (!f) continue;
     if (!sentIds.insert(f->getId()).second) {
       continue;
     }
-    if (useHopLimit) {
-      NFD_LOG_DEBUG("OptoFlood forward data=" << data.getName()
-                    << " floodId=" << *floodIdOpt
-                    << " outFace=" << f->getId()
-                    << " remainingHopLimit=" << (hopLimit - 1));
-    }
-    else {
-      NFD_LOG_DEBUG("OptoFlood forward data=" << data.getName()
-                    << " floodId=" << *floodIdOpt
-                    << " outFace=" << f->getId()
-                    << " remainingHopLimit=disabled");
-    }
+    NFD_LOG_DEBUG("OptoFlood forward data=" << data.getName()
+                  << " floodId=" << *floodIdOpt
+                  << " outFace=" << f->getId());
     f->sendData(data);
   }
 
